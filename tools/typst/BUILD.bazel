@@ -1,0 +1,14 @@
+package(default_visibility = ["//visibility:public"])
+
+filegroup(
+    name = "typst_bin",
+    srcs = select({
+        "//build/platforms:linux_aarch64": ["@typst-aarch64-unknown-linux-musl//:typst_bin"],
+        "//build/platforms:linux_x86_64": ["@typst-x86_64-unknown-linux-musl//:typst_bin"],
+    }),
+)
+
+sh_binary(
+    name = "typst_compile_pdf",
+    srcs = ["typst_compile_pdf.sh"],
+)
