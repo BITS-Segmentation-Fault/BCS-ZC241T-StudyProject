@@ -1,3 +1,7 @@
+"""
+Typst PDF compile helper
+"""
+
 def _typst_pdf_impl(ctx):
     main = ctx.file.main
     typst = ctx.file._typst
