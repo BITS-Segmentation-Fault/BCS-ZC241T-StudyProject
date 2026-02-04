@@ -1,0 +1,17 @@
+load("@rules_pkg//pkg:zip.bzl", "pkg_zip")
+
+
+genrule(
+    name = "153_Sarathi_LinuxSandboxing",
+    srcs = ["//docs:Phase_1__Problem_Identification_and_Planning"],
+    outs = ["153_Sarathi_LinuxSandboxing.pdf"],
+    cmd = "cp $(location //docs:Phase_1__Problem_Identification_and_Planning) $@",
+)
+
+pkg_zip(
+    name = "study_project_dist",
+    srcs = [
+        ":153_Sarathi_LinuxSandboxing",
+    ],
+    include_runfiles = True,
+)

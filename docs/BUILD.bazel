@@ -1,0 +1,10 @@
+load("//tools/typst:typst_pdf.bzl", "typst_pdf")
+
+typst_pdf(
+    name = "Phase_1__Problem_Identification_and_Planning",
+    srcs = glob([
+        "Phase_1__Problem_Identification_and_Planning/**",
+    ]),
+    main = "Phase_1__Problem_Identification_and_Planning/main.typ",
+    visibility = ["//visibility:public"],
+)
