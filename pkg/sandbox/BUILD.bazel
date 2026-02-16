@@ -1,0 +1,16 @@
+load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
+
+filegroup(
+    name = "demo_zip",
+    srcs = ["//sandbox:demo"],
+    output_group = "python_zip_file",
+)
+
+pkg_files(
+    name = "bundle",
+    srcs = [
+        ":demo_zip",
+    ],
+    prefix = "sandbox",
+    visibility = ["//pkg:__subpackages__"],
+)
