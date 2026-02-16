@@ -1,16 +1,24 @@
 load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
 
 genrule(
-    name = "153_Sarathi_LinuxSandboxing",
+    name = "doc_phase1",
     srcs = ["//docs:Phase_1__Problem_Identification_and_Planning"],
-    outs = ["153_Sarathi_LinuxSandboxing.pdf"],
+    outs = ["153_Sarathi_LinuxSandboxing_phase1.pdf"],
     cmd = "cp $(location //docs:Phase_1__Problem_Identification_and_Planning) $@",
+)
+
+genrule(
+    name = "doc_phase2",
+    srcs = ["//docs:Phase_2__Design_and_Proof_of_Concept"],
+    outs = ["153_Sarathi_LinuxSandboxing_phase2.pdf"],
+    cmd = "cp $(location //docs:Phase_2__Design_and_Proof_of_Concept) $@",
 )
 
 pkg_files(
     name = "bundle",
     srcs = [
-        ":153_Sarathi_LinuxSandboxing",
+        ":doc_phase1",
+        ":doc_phase2",
     ],
     prefix = "docs",
     visibility = ["//pkg:__subpackages__"],

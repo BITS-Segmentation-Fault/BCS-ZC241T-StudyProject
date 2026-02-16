@@ -8,3 +8,12 @@ typst_pdf(
     main = "Phase_1__Problem_Identification_and_Planning/main.typ",
     visibility = ["//visibility:public"],
 )
+
+typst_pdf(
+    name = "Phase_2__Design_and_Proof_of_Concept",
+    srcs = glob([
+        "Phase_2__Design_and_Proof_of_Concept/**",
+    ]),
+    main = "Phase_2__Design_and_Proof_of_Concept/main.typ",
+    visibility = ["//visibility:public"],
+)
