@@ -1,41 +1,12 @@
 import logging
 import os
 import signal
-from pathlib import Path
 
 from sandbox.demo.child import child
 from sandbox.demo.common import ACK_BYTE, READY_BYTE
 from sandbox.demo.config import Config
 from sandbox.demo.diag import log_identity
-from sandbox.demo.fs import write_text
-
-
-def write_id_maps(
-    child_pid: int, host_uid: int, host_gid: int, *, logger: logging.Logger
-) -> None:
-    proc = Path(f"/proc/{child_pid}")
-    uid_map_path = proc / "uid_map"
-    gid_map_path = proc / "gid_map"
-    setgroups_path = proc / "setgroups"
-
-    try:
-        if setgroups_path.exists():
-            write_text(setgroups_path, "deny\n")
-            logger.debug(f"wrote {setgroups_path}: deny")
-    except OSError as e:
-        logger.warning(f"could not write {setgroups_path}: {e} (gid_map may fail)")
-
-    uid_map = f"0 {host_uid} 1\n"
-    gid_map = f"0 {host_gid} 1\n"
-
-    write_text(uid_map_path, uid_map)
-    logger.debug(f"wrote {uid_map_path}:\n{uid_map}")
-
-    try:
-        write_text(gid_map_path, gid_map)
-        logger.debug(f"wrote {gid_map_path}:\n{gid_map}")
-    except OSError as e:
-        logger.warning(f"could not write {gid_map_path}: {e} (groups may be limited)")
+from sandbox.demo.idmap import write_idmaps
 
 
 def parent(
@@ -82,7 +53,7 @@ def parent(
 
     logger.debug(f"child ready; writing uid/gid maps for pid={pid}")
     try:
-        write_id_maps(pid, host_uid, host_gid, logger=logger)
+        write_idmaps(pid, host_uid, host_gid, logger=logger)
     except OSError as e:
         logger.error(f"failed to write uid/gid maps: {e}")
         try:
