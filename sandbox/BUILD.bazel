@@ -4,3 +4,8 @@ alias(
     name = "demo",
     actual = "//sandbox/demo:demo",
 )
+
+alias(
+    name = "demo_precompiled",
+    actual = "//sandbox/demo:demo_precompiled",
+)

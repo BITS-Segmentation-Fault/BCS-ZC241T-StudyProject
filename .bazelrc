@@ -1,3 +1,2 @@
 build --workspace_status_command=tools/scripts/workspace_status.sh
 build --stamp
-build --build_python_zip

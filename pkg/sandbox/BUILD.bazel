@@ -2,7 +2,7 @@ load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
 
 filegroup(
     name = "demo_zip",
-    srcs = ["//sandbox:demo"],
+    srcs = ["//sandbox:demo_precompiled"],
     output_group = "python_zip_file",
 )
 
