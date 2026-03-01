@@ -17,3 +17,12 @@ typst_pdf(
     main = "Phase_2__Design_and_Proof_of_Concept/main.typ",
     visibility = ["//visibility:public"],
 )
+
+typst_pdf(
+    name = "Phase_3__Implementation_Readiness_and_Validation",
+    srcs = glob([
+        "Phase_3__Implementation_Readiness_and_Validation/**",
+    ]),
+    main = "Phase_3__Implementation_Readiness_and_Validation/main.typ",
+    visibility = ["//visibility:public"],
+)

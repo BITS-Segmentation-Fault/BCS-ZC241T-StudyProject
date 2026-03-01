@@ -14,11 +14,19 @@ genrule(
     cmd = "cp $(location //docs:Phase_2__Design_and_Proof_of_Concept) $@",
 )
 
+genrule(
+    name = "doc_phase3",
+    srcs = ["//docs:Phase_3__Implementation_Readiness_and_Validation"],
+    outs = ["153_Sarathi_LinuxSandboxing_phase3.pdf"],
+    cmd = "cp $(location //docs:Phase_3__Implementation_Readiness_and_Validation) $@",
+)
+
 pkg_files(
     name = "bundle",
     srcs = [
         ":doc_phase1",
         ":doc_phase2",
+        ":doc_phase3",
     ],
     prefix = "docs",
     visibility = ["//pkg:__subpackages__"],
