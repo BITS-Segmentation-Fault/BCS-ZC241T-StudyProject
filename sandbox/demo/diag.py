@@ -17,10 +17,10 @@ def log_identity(
     ruid, reuid, suid = os.getresuid()
     rgid, regid, sgid = os.getresgid()
 
-    logger.info(f"=== {label} ===")
-    logger.info(f"host: uid={host_uid},gid={host_gid}")
-    logger.info(f"self: uid={uid},euid={euid},gid={gid},egid={egid}")
-    logger.info(f"self: resuid={ruid},{reuid},{suid} resgid={rgid},{regid},{sgid}")
+    logger.debug(f"=== {label} ===")
+    logger.debug(f"host: uid={host_uid},gid={host_gid}")
+    logger.debug(f"self: uid={uid},euid={euid},gid={gid},egid={egid}")
+    logger.debug(f"self: resuid={ruid},{reuid},{suid} resgid={rgid},{regid},{sgid}")
 
     uid_map = read_text("/proc/self/uid_map")
     gid_map = read_text("/proc/self/gid_map")

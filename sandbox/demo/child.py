@@ -22,7 +22,7 @@ def child(
     except Exception:
         logger.debug("os.setgroups([]) not permitted; continuing")
 
-    logger.info("child starting before unshare()")
+    logger.debug("child starting before unshare()")
     log_identity(logger, "child (before unshare)", host_uid, host_gid)
 
     # Build namespace flags
@@ -32,7 +32,7 @@ def child(
 
     try:
         os.unshare(flags)
-        logger.info(f"unshare success (flags={flags})")
+        logger.debug(f"unshare success (flags={flags})")
     except OSError as e:
         logger.error(f"unshare fail (flags={flags}): {e}")
         return 1
@@ -57,11 +57,11 @@ def child(
     except PermissionError as e:
         logger.warning(f"setresuid(0) fail: {e}; continuing")
 
-    logger.info("child is now root inside the user namespace")
+    logger.debug("child is now root inside the user namespace")
     log_identity(logger, "child (after mapping + setuid(0))", host_uid, host_gid)
 
     # execute target program
-    logger.info(f"exec: {cfg.command}")
+    logger.debug(f"exec: {cfg.command}")
     flush_logs()
 
     try:

@@ -17,7 +17,7 @@ def parent(
     host_uid = os.getuid()
     host_gid = os.getgid()
 
-    logger.info(f"host: uid={host_uid},gid={host_gid}")
+    logger.debug(f"host: uid={host_uid},gid={host_gid}")
     log_identity(logger, "parent (host namespace)", host_uid, host_gid)
 
     c2p_r, c2p_w = os.pipe()
@@ -69,5 +69,5 @@ def parent(
     _, status = os.waitpid(pid, 0)
     code = os.waitstatus_to_exitcode(status)
 
-    logger.info(f"child exit code: {code}")
+    logger.debug(f"child exit code: {code}")
     return code
