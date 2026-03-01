@@ -4,6 +4,7 @@ import os
 from sandbox.demo.common import ACK_BYTE, READY_BYTE
 from sandbox.demo.config import Config
 from sandbox.demo.diag import log_identity
+from sandbox.demo.network import NetworkMode
 from sandbox.demo.utils import flush_logs
 
 
@@ -23,11 +24,17 @@ def child(
 
     logger.info("child starting before unshare()")
     log_identity(logger, "child (before unshare)", host_uid, host_gid)
+
+    # Build namespace flags
+    flags = os.CLONE_NEWUSER
+    if cfg.network_mode != NetworkMode.HOST:
+        flags |= os.CLONE_NEWNET
+
     try:
-        os.unshare(os.CLONE_NEWUSER | os.CLONE_NEWNET)
-        logger.info("unshare(CLONE_NEWUSER) success")
+        os.unshare(flags)
+        logger.info(f"unshare success (flags={flags})")
     except OSError as e:
-        logger.error(f"unshare(CLONE_NEWUSER) fail: {e}")
+        logger.error(f"unshare fail (flags={flags}): {e}")
         return 1
 
     # tell parent that we are ready
@@ -48,12 +55,12 @@ def child(
     try:
         os.setresuid(0, 0, 0)
     except PermissionError as e:
-        logger.warning(f"setresgid(0) fail: {e}; continuing")
+        logger.warning(f"setresuid(0) fail: {e}; continuing")
 
     logger.info("child is now root inside the user namespace")
     log_identity(logger, "child (after mapping + setuid(0))", host_uid, host_gid)
 
-    # normal behavior: execute target program
+    # execute target program
     logger.info(f"exec: {cfg.command}")
     flush_logs()
 
