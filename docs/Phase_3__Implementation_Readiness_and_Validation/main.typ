@@ -289,28 +289,28 @@ _(Continued @implementation.)_
     - outside sandbox: id reports normal user UID/GID (e.g., `1000`),
     - inside sandbox: id reports `uid=0`,`gid=0` (namespace-root),
     - but this must not imply host-root privileges.
-  - Observed result: matches expected (see screenshot #link(<testing-demos>)[below]).
+  - Observed result: matches expected (see #link(<testing-demos-identity>)[screenshot below]).
   - Status: *Pass*
 
 - *Mapping evidence: procfs `uid_map`/`gid_map` validation*
   - Feature tested: UID/GID mapping correctness (procfs mapping files provided by kernel)
   - Expected behavior:
     - `/proc/<pid>/uid_map` and `/proc/<pid>/gid_map` show the mapping lines applied to the sandboxed process.
-  - Observed result: mapping file inspection matches expected mapping semantics (see screenshot #link(<testing-demos>)[below]).
+  - Observed result: mapping file inspection matches expected mapping semantics (see #link(<testing-demos-mapping>)[screenshot below]).
   - Status: *Pass*
 
 - *Network "deny" mode: no external DNS reachability*
   - Feature tested: network namespace isolation with `CLONE_NEWNET`
   - Expected behavior:
     - in a new network namespace with no additional setup, there are no usable external interfaces; connectivity and DNS resolution should fail unless explicitly configured.
-  - Observed result: `nslookup` fails inside sandbox with "network unreachable," while host `nslookup` succeeds (see screenshot #link(<testing-demos>)[below]).
+  - Observed result: `nslookup` fails inside sandbox with "network unreachable," while host `nslookup` succeeds (see #link(<testing-demos-network>)[screenshot below]).
   - Status: *Pass*
 
 - *Staging correctness: parent/child handshake*
   - Feature tested: deterministic "`READY` #sym.arrow parent writes maps #sym.arrow `ACK`" staging
   - Expected behavior:
     - child blocks until mappings are applied, since user namespace begins with no mappings and mapping setup has ordering constraints.
-  - Observed result: logs show child "ready" then continues after `ACK`, consistent with staged design.
+  - Observed result: logs show child "ready" then continues after `ACK`, consistent with staged design (see #link(<testing-demos-logs>)[screenshot below]).
   - Status: *Pass*
 
 #v(1.5em)
@@ -319,25 +319,45 @@ _(See #link(<testing-demos>)[next page].)_
 
 #pagebreak()
 
-== Visual evidence from Phase II demonstrations <testing-demos>
+== Visual evidence from PoC demonstrations <testing-demos>
 
-- Identity transformation and execution inside user namespace: #image("poc-demo-1-identity.png")
+=== Identity transformation and execution inside sandbox <testing-demos-identity>
 
-#pagebreak()
+#image("poc-demo-1-identity.png")
 
-- File ownership correspondance: #image("poc-demo-2-fileown.png")
-
-#pagebreak()
-
-- Procfs mapping inspection: #image("poc-demo-3-mapping.png")
+*Observation:* The UID/GID are 1000 (user) on the host but appear as 0 (root) inside the sandbox. The `id` comamnd executes successfully inside the sandbox.
 
 #pagebreak()
 
-- Network isolation `nslookup` failure in deny mode: #image("poc-demo-4-network.png")
+=== File ownership correspondance <testing-demos-fileown>
+
+#image("poc-demo-2-fileown.png")
+
+*Observation:* The file appears to be owned by UID/GID 0 (root) inside the sandbox, but it is actually owned by UID/GID 1000 (user) on the host.
 
 #pagebreak()
 
-- Verbose logging: #image("poc-demo-5-logs.png")
+=== Procfs mapping inspection <testing-demos-mapping>
+
+#image("poc-demo-3-mapping.png")
+
+*Observation:* The sandbox UID/GID 0 (root) correctly maps to host UID/GID 1000 (user).
+
+#pagebreak()
+
+=== Network isolation `nslookup` failure in deny mode <testing-demos-network>
+
+#image("poc-demo-4-network.png")
+
+*Observation:* The `nslookup` command succeeds on both the host and inside the sandbox when using "host" network mode, but it fails inside the sandbox when using "none" network mode.
+
+#pagebreak()
+
+=== Verbose logging <testing-demos-logs>
+
+#image("poc-demo-5-logs.png")
+
+*Observation:* The child process correctly sends "`READY`" to the parent when it is time to perform UID/GID mapping, then it waits for the parent complete the mapping. The parent sends "`ACK`" once the UID/GID mapping is done, after which the child proceeds correctly.
 
 #pagebreak()
 
