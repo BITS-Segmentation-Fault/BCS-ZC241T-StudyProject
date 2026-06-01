@@ -1,11 +1,10 @@
-"""
-Typst PDF compile helper
-"""
+"""Typst PDF compile helper"""
+
+_TOOLCHAIN_TYPE = "//tools/typst:toolchain_type"
 
 def _typst_pdf_impl(ctx):
     main = ctx.file.main
-    typst = ctx.file._typst
-    runner = ctx.executable._runner
+    typst = ctx.toolchains[_TOOLCHAIN_TYPE].typst
 
     out = ctx.outputs.out
     if out == None:
@@ -16,8 +15,30 @@ def _typst_pdf_impl(ctx):
         transitive = [depset(ctx.files.srcs)],
     )
 
-    ctx.actions.run(
-        executable = runner,
+    ctx.actions.run_shell(
+        command = """
+set -euo pipefail
+
+readonly typst="$1"
+readonly version_file="$2"
+readonly pdf_standard="$3"
+readonly main="$4"
+readonly out="$5"
+
+readonly ts="$(awk '$1=="STABLE_GIT_TIMESTAMP"{print $2; exit}' "$version_file" || true)"
+if [[ -z "${ts:-}" ]]; then
+    echo "ERROR: STABLE_GIT_TIMESTAMP missing" >&2
+    exit 1
+fi
+
+exec "$typst" compile \
+    --format pdf \
+    --ignore-system-fonts \
+    --creation-timestamp "$ts" \
+    --pdf-standard "$pdf_standard" \
+    "$main" \
+    "$out"
+""",
         tools = [typst],
         inputs = inputs,
         outputs = [out],
@@ -41,15 +62,6 @@ typst_pdf = rule(
         "srcs": attr.label_list(allow_files = True),
         "pdf_standard": attr.string(default = "1.7"),
         "out": attr.output(mandatory = False),
-        "_typst": attr.label(
-            default = Label("//tools/typst:typst_bin"),
-            allow_single_file = True,
-            cfg = "exec",
-        ),
-        "_runner": attr.label(
-            default = Label("//tools/typst:typst_compile_pdf"),
-            executable = True,
-            cfg = "exec",
-        ),
     },
+    toolchains = [_TOOLCHAIN_TYPE],
 )
