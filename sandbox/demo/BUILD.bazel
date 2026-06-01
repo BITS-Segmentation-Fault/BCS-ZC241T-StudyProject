@@ -1,4 +1,5 @@
 load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python/zipapp:py_zipapp_binary.bzl", "py_zipapp_binary")
 
 py_binary(
     name = "demo",
@@ -15,5 +16,11 @@ py_binary(
     precompile_optimize_level = 2,
     precompile_source_retention = "omit_source",
     pyc_collection = "include_pyc",
+    visibility = ["//sandbox:__subpackages__"],
+)
+
+py_zipapp_binary(
+    name = "demo_precompiled_zipapp",
+    binary = ":demo_precompiled",
     visibility = ["//sandbox:__subpackages__"],
 )

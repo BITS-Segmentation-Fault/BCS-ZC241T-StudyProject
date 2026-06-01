@@ -9,3 +9,8 @@ alias(
     name = "demo_precompiled",
     actual = "//sandbox/demo:demo_precompiled",
 )
+
+alias(
+    name = "demo_precompiled_zipapp",
+    actual = "//sandbox/demo:demo_precompiled_zipapp",
+)
