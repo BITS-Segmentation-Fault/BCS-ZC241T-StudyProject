@@ -1,19 +1,25 @@
-load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
 
-py_binary(
-    name = "demo",
-    srcs = glob(["**/*.py"]),
-    main = "main.py",
-    visibility = ["//sandbox:__subpackages__"],
+go_library(
+    name = "demo_lib",
+    srcs = [
+        "main.go",
+        "args.go",
+    ],
+    importpath = "sandbox/demo",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//config",
+        "//network",
+        "//parent",
+        "//child",
+        "//common",
+        "//utils",
+    ],
 )
 
-py_binary(
-    name = "demo_precompiled",
-    srcs = glob(["**/*.py"]),
-    main = "main.py",
-    precompile = "enabled",
-    precompile_optimize_level = 2,
-    precompile_source_retention = "omit_source",
-    pyc_collection = "include_pyc",
+go_binary(
+    name = "demo",
+    embed = [":demo_lib"],
     visibility = ["//sandbox:__subpackages__"],
 )
