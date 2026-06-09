@@ -25,37 +25,35 @@ bazel run //sandbox:demo -- <options>
 
 ### Production build workflow
 
-Use the `prod-build.sh` helper script:
-
 ```bash
-./prod-build.sh //sandbox:demo_precompiled
+bazel build //sandbox:demo_precompiled_zipapp
 ```
 
 Run the built Python zipapp binary:
 
 ```bash
-python ./bazel-bin/sandbox/demo/demo_precompiled.zip <options>
+python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz <options>
 ```
 
 ### Examples
 
 1. Hello, world!
    ```bash
-   python ./bazel-bin/sandbox/demo/demo_precompiled.zip -- echo "hello world"
+   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz -- echo "hello world"
    ```
 2. `id` command
    ```bash
-   python ./bazel-bin/sandbox/demo/demo_precompiled.zip -- id
+   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz -- id
    ```
 3. internet on (default)
    ```bash
-   python ./bazel-bin/sandbox/demo/demo_precompiled.zip -- nslookup google.com
+   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz -- nslookup google.com
    ```
 4. internet off (network mode = "none")
    ```bash
-   python ./bazel-bin/sandbox/demo/demo_precompiled.zip --network-mode=none -- nslookup google.com
+   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz --network-mode=none -- nslookup google.com
    ```
 5. verbose logging (`true` is a linux command that exits with code 0)
    ```bash
-   python ./bazel-bin/sandbox/demo/demo_precompiled.zip --verbose -- true
+   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz --verbose -- true
    ```
