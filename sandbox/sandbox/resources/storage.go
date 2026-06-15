@@ -13,7 +13,7 @@ import (
 
 const mbToBytes = 1024 * 1024
 
-// ApplyInitialStorageLimit binds the starting capacity ceiling to the child process.
+// Bind the starting capacity ceiling to the child process.
 func ApplyInitialStorageLimit(cfg config.StorageConfig) error {
 	initialBytes := uint64(cfg.InitialLimitMB) * mbToBytes
 	maxBytes := uint64(cfg.AbsoluteMaximumMB) * mbToBytes
@@ -29,7 +29,7 @@ func ApplyInitialStorageLimit(cfg config.StorageConfig) error {
 	return nil
 }
 
-// EvaluateStorageExpansion checks the policy matrix when a file size threshold is reached.
+// Check the policy matrix when a file size threshold is reached.
 func EvaluateStorageExpansion(pid int, cfg config.StorageConfig, currentExpansionCount int) (bool, int) {
 	currentLimitMB := cfg.InitialLimitMB + (currentExpansionCount * cfg.IncrementStepMB)
 	nextLimitMB := currentLimitMB + cfg.IncrementStepMB

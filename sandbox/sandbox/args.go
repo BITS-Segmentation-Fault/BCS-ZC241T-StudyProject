@@ -17,68 +17,92 @@ type Args struct {
 }
 
 func ParseArgs(argv []string) (Args, error) {
+	// Early parse to detect -config before the full flag set processes
+	earlyFS := flag.NewFlagSet("config-detect", flag.ContinueOnError)
+	earlyFS.SetOutput(io.Discard)
+	configPath := earlyFS.String("config", "", "")
+	_ = earlyFS.Parse(argv)
+
+	var baseCfg config.Config
+	if *configPath != "" {
+		loaded, err := config.LoadConfig(*configPath)
+		if err != nil {
+			return Args{}, fmt.Errorf("config: %v", err)
+		}
+		baseCfg = *loaded
+	} else {
+		baseCfg = config.DefaultConfig()
+	}
+
+	// Main flag set with defaults from YAML or stock defaults
 	fs := flag.NewFlagSet("sandbox", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	// Fetch secure standard baselines
-	defaultCfg := config.DefaultConfig()
-
-	networkModeStr := fs.String("network-mode", string(defaultCfg.NetworkMode), "Network namespace isolation mode")
 	verbose := fs.Bool("verbose", false, "Enable microsecond diagnostic trace tracking records")
-
-	// Command line configuration bindings for resource policies
-	envWhitelistStr := fs.String("env-whitelist", "", "Comma-separated keys of allowed host environment variables")
-	initialStorage := fs.Int("storage-initial", defaultCfg.Storage.InitialLimitMB, "Initial file storage limit boundary in Megabytes")
-	maxStorage := fs.Int("storage-max", defaultCfg.Storage.AbsoluteMaximumMB, "Absolute hard stop file storage capacity limit in Megabytes")
-	storagePolicy := fs.String("storage-policy", defaultCfg.Storage.ExpansionPolicy, "Threshold breach mitigation rule policy behavior")
-	storageStep := fs.Int("storage-step", defaultCfg.Storage.IncrementStepMB, "Capacity allocation block added upon limit violation triggers")
+	networkModeStr := fs.String("network-mode", string(baseCfg.NetworkMode), "Network namespace isolation mode")
+	envWhitelistStr := fs.String("env-whitelist", strings.Join(baseCfg.EnvWhitelist, ","), "Comma-separated keys of allowed host environment variables")
+	initialStorage := fs.Int("storage-initial", baseCfg.Storage.InitialLimitMB, "Initial file storage limit boundary in Megabytes")
+	maxStorage := fs.Int("storage-max", baseCfg.Storage.AbsoluteMaximumMB, "Absolute hard stop file storage capacity limit in Megabytes")
+	storagePolicy := fs.String("storage-policy", baseCfg.Storage.ExpansionPolicy, "Threshold breach mitigation rule policy behavior")
+	storageStep := fs.Int("storage-step", baseCfg.Storage.IncrementStepMB, "Capacity allocation block added upon limit violation triggers")
 
 	if err := fs.Parse(argv); err != nil {
 		return Args{}, err
 	}
 
-	command := fs.Args()
-	if len(command) == 0 {
-		return Args{}, errors.New("error: the following arguments are required: command")
-	}
+	// Start from base config and overlay CLI-provided values
+	cfg := baseCfg
 
-	for _, arg := range command {
-		if strings.TrimSpace(arg) == "" {
-			return Args{}, errors.New("value_error: command argument is empty or only whitespace")
+	// Network mode override
+	if *networkModeStr != string(baseCfg.NetworkMode) {
+		netMode := network.NetworkMode(*networkModeStr)
+		if !netMode.IsValid() {
+			return Args{}, fmt.Errorf("value_error: %q is not a valid NetworkMode", *networkModeStr)
 		}
+		cfg.NetworkMode = netMode
 	}
 
-	netMode := network.NetworkMode(*networkModeStr)
-	if !netMode.IsValid() {
-		return Args{}, fmt.Errorf("value_error: %q is not a valid NetworkMode", *networkModeStr)
-	}
-
-	// Construct safe custom environment array fields
-	var whitelistSlice []string
+	// Environment whitelist override
 	if *envWhitelistStr != "" {
 		parts := strings.Split(*envWhitelistStr, ",")
+		var whitelist []string
 		for _, part := range parts {
 			trimmed := strings.TrimSpace(part)
 			if trimmed != "" {
-				whitelistSlice = append(whitelistSlice, trimmed)
+				whitelist = append(whitelist, trimmed)
 			}
+		}
+		if len(whitelist) > 0 {
+			cfg.EnvWhitelist = whitelist
 		}
 	}
 
-	// Populate the comprehensive parsed Config runtime state
-	cfg := config.Config{
-		NetworkMode:  netMode,
-		Command:      command,
-		EnvWhitelist: whitelistSlice,
-		Storage: config.StorageConfig{
-			InitialLimitMB:    *initialStorage,
-			AbsoluteMaximumMB: *maxStorage,
-			ExpansionPolicy:   strings.ToLower(*storagePolicy),
-			IncrementStepMB:   *storageStep,
-		},
+	// Storage overrides
+	if *initialStorage != config.DefaultConfig().Storage.InitialLimitMB {
+		cfg.Storage.InitialLimitMB = *initialStorage
+	}
+	if *maxStorage != config.DefaultConfig().Storage.AbsoluteMaximumMB {
+		cfg.Storage.AbsoluteMaximumMB = *maxStorage
+	}
+	if *storagePolicy != config.DefaultConfig().Storage.ExpansionPolicy {
+		cfg.Storage.ExpansionPolicy = strings.ToLower(*storagePolicy)
+	}
+	if *storageStep != config.DefaultConfig().Storage.IncrementStepMB {
+		cfg.Storage.IncrementStepMB = *storageStep
 	}
 
-	// Trigger the schema-wide verification guard logic
+	// Positional args override command
+	command := fs.Args()
+	if len(command) > 0 {
+		for _, arg := range command {
+			if strings.TrimSpace(arg) == "" {
+				return Args{}, errors.New("value_error: command argument is empty or only whitespace")
+			}
+		}
+		cfg.Command = command
+	}
+
+	// Validate merged result
 	if err := cfg.Validate(); err != nil {
 		return Args{}, err
 	}
