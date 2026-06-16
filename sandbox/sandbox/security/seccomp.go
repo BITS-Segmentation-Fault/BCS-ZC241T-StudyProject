@@ -8,35 +8,35 @@ import (
 	"syscall"
 	"unsafe"
 
+	"sandbox/demo/config"
+
 	"golang.org/x/sys/unix"
 )
 
-// Linux Kernel Seccomp Definitions
+// Seccomp constants
 const (
 	SECCOMP_SET_MODE_FILTER   = 1
 	SECCOMP_FILTER_FLAG_TSYNC = 1
 
-	// Seccomp Return Actions
-	SECCOMP_RET_KILL_PROCESS = 0x80000000 // Tier 2: Hard kill process immediately
-	SECCOMP_RET_TRAP         = 0x00030000 // Tier 2: Trigger SIGSYS signal to parent
-	SECCOMP_RET_LOG          = 0x7ffc0000 // Tier 1: Allow but log to auditd
-	SECCOMP_RET_ALLOW        = 0x7fff0000 // Standard operation: Allow call completely
+	SECCOMP_RET_KILL_PROCESS = 0x80000000
+	SECCOMP_RET_TRAP         = 0x00030000
+	SECCOMP_RET_LOG          = 0x7ffc0000
+	SECCOMP_RET_ALLOW        = 0x7fff0000
+)
 
-	// BPF Opcode Instructions
+// BPF opcodes
+const (
 	BPF_LD  = 0x00
 	BPF_W   = 0x00
 	BPF_ABS = 0x20
 	BPF_JMP = 0x05
 	BPF_RET = 0x06
 	BPF_K   = 0x00
-	BPF_JA  = 0x00
 	BPF_JEQ = 0x10
 
-	// Data offsets in seccomp_data struct passed by kernel
-	seccomp_data_arch_offset = 4
-	seccomp_data_nr_offset   = 0
+	seccompDataArchOffset = 4
+	seccompDataNrOffset   = 0
 
-	// Audit Token Architecture validation
 	AUDIT_ARCH_X86_64 = 0xc000003e
 )
 
@@ -52,52 +52,87 @@ type sockFprog struct {
 	filter *sockFilter
 }
 
-// ApplySeccompFilters configures the two-tiered filtering mechanism inside child.go.
+// Map human-readable syscall names to platform-specific numbers.
+var syscallNameToNumber = map[string]uint32{
+	"reboot":            uint32(unix.SYS_REBOOT),
+	"mount":             uint32(unix.SYS_MOUNT),
+	"ptrace":            uint32(unix.SYS_PTRACE),
+	"swapon":            uint32(unix.SYS_SWAPON),
+	"syslog":            uint32(unix.SYS_SYSLOG),
+	"init_module":       uint32(unix.SYS_INIT_MODULE),
+	"finit_module":      uint32(unix.SYS_FINIT_MODULE),
+	"delete_module":     uint32(unix.SYS_DELETE_MODULE),
+	"iopl":              uint32(unix.SYS_IOPL),
+	"ioperm":            uint32(unix.SYS_IOPERM),
+	"kcmp":              uint32(unix.SYS_KCMP),
+	"process_vm_readv":  uint32(unix.SYS_PROCESS_VM_READV),
+	"process_vm_writev": uint32(unix.SYS_PROCESS_VM_WRITEV),
+	"nfsservctl":        uint32(unix.SYS_NFSSERVCTL),
+	"create_module":     uint32(unix.SYS_CREATE_MODULE),
+}
+
+// Map SeccompAction to its SECCOMP_RET_* constant.
+func actionToReturn(action config.SeccompAction) uint32 {
+	switch action {
+	case config.ActionKill:
+		return SECCOMP_RET_KILL_PROCESS
+	case config.ActionTrap:
+		return SECCOMP_RET_TRAP
+	case config.ActionLog:
+		return SECCOMP_RET_LOG
+	case config.ActionAllow:
+		return SECCOMP_RET_ALLOW
+	default:
+		return SECCOMP_RET_KILL_PROCESS
+	}
+}
+
+// Backwards-compatible shim that uses default secure settings.
 func ApplySeccompFilters() error {
+	return ApplySeccompFiltersCustom(config.ActionKill, []string{"mount", "reboot", "ptrace", "swapon", "syslog"})
+}
+
+// Install a BPF seccomp filter that blocks the given syscalls and apply the specified default action when a blocked call is detected.
+func ApplySeccompFiltersCustom(defaultAction config.SeccompAction, blockedSyscalls []string) error {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("failed to set PR_SET_NO_NEW_PRIVS: %v", err)
 	}
 
-	instructions := []sockFilter{
-		// 1. Load the CPU architecture token into the accumulator
-		{BPF_LD | BPF_W | BPF_ABS, 0, 0, seccomp_data_arch_offset},
-		// 2. If architecture is x86_64, skip the next instruction. If false, kill execution.
-		{BPF_JMP | BPF_JEQ | BPF_K, 1, 0, AUDIT_ARCH_X86_64},
-		{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS},
+	returnAction := actionToReturn(defaultAction)
 
-		// 3. Load the requested system call number into the accumulator
-		{BPF_LD | BPF_W | BPF_ABS, 0, 0, seccomp_data_nr_offset},
+	// Build instruction list
+	var instructions []sockFilter
 
-		// TIER 2: CRITICAL WARNINGS (Block & Trap to Parent via SIGSYS)
-		// If syscall == sys_reboot (167), trap execution
-		{BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 167},
-		{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_TRAP},
+	// Load architecture
+	instructions = append(instructions, sockFilter{BPF_LD | BPF_W | BPF_ABS, 0, 0, seccompDataArchOffset})
+	// 1: Check architecture == x86_64; if not, kill
+	instructions = append(instructions, sockFilter{BPF_JMP | BPF_JEQ | BPF_K, 1, 0, AUDIT_ARCH_X86_64})
+	instructions = append(instructions, sockFilter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS})
 
-		// If syscall == sys_mount (165), trap execution
-		{BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 165},
-		{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_TRAP},
+	// Load syscall number
+	instructions = append(instructions, sockFilter{BPF_LD | BPF_W | BPF_ABS, 0, 0, seccompDataNrOffset})
 
-		// If syscall == sys_ptrace (101), trap execution
-		{BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 101},
-		{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_TRAP},
-
-		// TIER 1: WARNINGS
-		{BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 50},
-		{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_LOG},
-
-		{BPF_JMP | BPF_JEQ | BPF_K, 0, 1, 43},
-		{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_LOG},
-
-		// DEFAULT FALLBACK PASS RULES
-		{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW},
+	// For each blocked syscall, emit: BPF_JEQ nr, 0, 1  /  RET action
+	for _, name := range blockedSyscalls {
+		nr, ok := syscallNameToNumber[name]
+		if !ok {
+			log.Printf("[WARNING] Unknown syscall name %q — skipping seccomp rule", name)
+			continue
+		}
+		instructions = append(instructions, sockFilter{BPF_JMP | BPF_JEQ | BPF_K, 0, 1, uint32(nr)})
+		instructions = append(instructions, sockFilter{BPF_RET | BPF_K, 0, 0, returnAction})
 	}
+
+	// Fall through: allow
+	instructions = append(instructions, sockFilter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW})
 
 	prog := sockFprog{
 		len:    uint16(len(instructions)),
 		filter: &instructions[0],
 	}
 
-	log.Printf("[DEBUG] Attempting to arm kernel Seccomp engine. Total instruction blocks: %d", prog.len)
+	log.Printf("[DEBUG] Arming seccomp filter. %d blocked syscalls, default action=0x%08x, total BPF blocks=%d",
+		len(blockedSyscalls), returnAction, prog.len)
 
 	_, _, errno := syscall.Syscall6(
 		uintptr(unix.SYS_SECCOMP),

@@ -10,6 +10,8 @@ import (
 )
 
 func TestMain_CLIParityMatrix(t *testing.T) {
+	baseDefaults := config.DefaultConfig()
+
 	tests := []struct {
 		name        string
 		argv        []string
@@ -21,10 +23,12 @@ func TestMain_CLIParityMatrix(t *testing.T) {
 			name: "Valid: Simplest baseline command execution",
 			argv: []string{"ls"},
 			want: Args{
-				Config: config.Config{
-					NetworkMode: network.Host,
-					Command:     []string{"ls"},
-				},
+				Config: func() config.Config {
+					c := baseDefaults
+					c.Command = []string{"ls"}
+					c.BinaryPath = ""
+					return c
+				}(),
 				Verbose: false,
 			},
 			wantErr: false,
@@ -33,10 +37,28 @@ func TestMain_CLIParityMatrix(t *testing.T) {
 			name: "Valid: Full configuration parameters with complex command",
 			argv: []string{"--network-mode", "none", "--verbose", "python", "-m", "venv"},
 			want: Args{
-				Config: config.Config{
-					NetworkMode: network.None,
-					Command:     []string{"python", "-m", "venv"},
-				},
+				Config: func() config.Config {
+					c := baseDefaults
+					c.NetworkMode = network.None
+					c.Command = []string{"python", "-m", "venv"}
+					c.BinaryPath = ""
+					return c
+				}(),
+				Verbose: true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "Valid: network host with verbose",
+			argv: []string{"--network-mode", "host", "--verbose", "/bin/sh"},
+			want: Args{
+				Config: func() config.Config {
+					c := baseDefaults
+					c.NetworkMode = network.Host
+					c.Command = []string{"/bin/sh"}
+					c.BinaryPath = ""
+					return c
+				}(),
 				Verbose: true,
 			},
 			wantErr: false,
@@ -46,14 +68,14 @@ func TestMain_CLIParityMatrix(t *testing.T) {
 			argv:        []string{},
 			want:        Args{},
 			wantErr:     true,
-			errContains: "arguments are required: command",
+			errContains: "either binary_path or command must be provided",
 		},
 		{
 			name:        "Error: Missing command positional arguments (Only flags present)",
 			argv:        []string{"--verbose"},
 			want:        Args{},
 			wantErr:     true,
-			errContains: "arguments are required: command",
+			errContains: "either binary_path or command must be provided",
 		},
 		{
 			name:        "Error: Unrecognized command-line flag syntax",

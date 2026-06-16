@@ -20,7 +20,7 @@ func TestReadSubIDRanges_ParityAndErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 1. Check valid parse optimization
+	// Check valid parse optimization
 	got, err := ReadSubIDRanges(subuidFile, "julian")
 	if err != nil {
 		t.Fatalf("Unexpected error parsing subuid: %v", err)
