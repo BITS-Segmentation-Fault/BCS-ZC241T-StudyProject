@@ -23,6 +23,19 @@ func ParseArgs(argv []string) (Args, error) {
 	configPath := earlyFS.String("config", "", "")
 	_ = earlyFS.Parse(argv)
 
+	// Filter out the -config flag and its values from argv so the main flag set doesn't panic
+	var cleanArgv []string
+	for i := 0; i < len(argv); i++ {
+		if argv[i] == "-config" || argv[i] == "--config" {
+			i++ // Skip the flag's value argument
+			continue
+		}
+		if strings.HasPrefix(argv[i], "-config=") || strings.HasPrefix(argv[i], "--config=") {
+			continue // Skip combined strings like --config=path
+		}
+		cleanArgv = append(cleanArgv, argv[i])
+	}
+
 	var baseCfg config.Config
 	if *configPath != "" {
 		loaded, err := config.LoadConfig(*configPath)
@@ -40,13 +53,17 @@ func ParseArgs(argv []string) (Args, error) {
 
 	verbose := fs.Bool("verbose", false, "Enable microsecond diagnostic trace tracking records")
 	networkModeStr := fs.String("network-mode", string(baseCfg.NetworkMode), "Network namespace isolation mode")
+	bridgeSubnet := fs.String("bridge-subnet", baseCfg.BridgeConfig.Subnet, "Bridge network subnet CIDR")
+	bridgeGateway := fs.String("bridge-gateway", baseCfg.BridgeConfig.GatewayIP, "Bridge gateway IP address")
+	bridgeContainerIP := fs.String("bridge-container-ip", baseCfg.BridgeConfig.ContainerIP, "Container bridge interface IP address")
 	envWhitelistStr := fs.String("env-whitelist", strings.Join(baseCfg.EnvWhitelist, ","), "Comma-separated keys of allowed host environment variables")
 	initialStorage := fs.Int("storage-initial", baseCfg.Storage.InitialLimitMB, "Initial file storage limit boundary in Megabytes")
 	maxStorage := fs.Int("storage-max", baseCfg.Storage.AbsoluteMaximumMB, "Absolute hard stop file storage capacity limit in Megabytes")
 	storagePolicy := fs.String("storage-policy", baseCfg.Storage.ExpansionPolicy, "Threshold breach mitigation rule policy behavior")
 	storageStep := fs.Int("storage-step", baseCfg.Storage.IncrementStepMB, "Capacity allocation block added upon limit violation triggers")
 
-	if err := fs.Parse(argv); err != nil {
+	// Use cleanArgv here instead of original unstripped argv
+	if err := fs.Parse(cleanArgv); err != nil {
 		return Args{}, err
 	}
 
@@ -60,6 +77,17 @@ func ParseArgs(argv []string) (Args, error) {
 			return Args{}, fmt.Errorf("value_error: %q is not a valid NetworkMode", *networkModeStr)
 		}
 		cfg.NetworkMode = netMode
+	}
+
+	// Bridge config overrides
+	if *bridgeSubnet != network.DefaultBridgeConfig().Subnet {
+		cfg.BridgeConfig.Subnet = *bridgeSubnet
+	}
+	if *bridgeGateway != network.DefaultBridgeConfig().GatewayIP {
+		cfg.BridgeConfig.GatewayIP = *bridgeGateway
+	}
+	if *bridgeContainerIP != network.DefaultBridgeConfig().ContainerIP {
+		cfg.BridgeConfig.ContainerIP = *bridgeContainerIP
 	}
 
 	// Environment whitelist override
