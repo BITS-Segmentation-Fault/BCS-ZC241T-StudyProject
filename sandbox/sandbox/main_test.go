@@ -85,6 +85,39 @@ func TestMain_CLIParityMatrix(t *testing.T) {
 			errContains: "flag provided but not defined",
 		},
 		{
+			name: "Valid: bridge mode with defaults",
+			argv: []string{"--network-mode", "bridge", "curl", "example.com"},
+			want: Args{
+				Config: func() config.Config {
+					c := baseDefaults
+					c.NetworkMode = network.Bridge
+					c.Command = []string{"curl", "example.com"}
+					c.BinaryPath = ""
+					return c
+				}(),
+				Verbose: false,
+			},
+			wantErr: false,
+		},
+		{
+			name: "Valid: bridge mode with custom subnet",
+			argv: []string{"--network-mode", "bridge", "--bridge-subnet", "172.20.0.0/24", "--bridge-gateway", "172.20.0.1", "--bridge-container-ip", "172.20.0.5", "curl", "example.com"},
+			want: Args{
+				Config: func() config.Config {
+					c := baseDefaults
+					c.NetworkMode = network.Bridge
+					c.BridgeConfig.Subnet = "172.20.0.0/24"
+					c.BridgeConfig.GatewayIP = "172.20.0.1"
+					c.BridgeConfig.ContainerIP = "172.20.0.5"
+					c.Command = []string{"curl", "example.com"}
+					c.BinaryPath = ""
+					return c
+				}(),
+				Verbose: false,
+			},
+			wantErr: false,
+		},
+		{
 			name:        "Error: Invalid network mode variant parsed",
 			argv:        []string{"--network-mode", "bad-enum-value", "ls"},
 			want:        Args{},

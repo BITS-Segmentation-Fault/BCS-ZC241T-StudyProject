@@ -102,6 +102,43 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "Valid: bridge mode with valid config",
+			inputConfig: Config{
+				BinaryPath:          "/bin/echo",
+				SeccompDefaultAction: ActionKill,
+				Storage: StorageConfig{
+					InitialLimitMB:    100,
+					AbsoluteMaximumMB: 500,
+					ExpansionPolicy:   "none",
+					IncrementStepMB:   0,
+				},
+				NetworkMode:  network.Bridge,
+				BridgeConfig: network.DefaultBridgeConfig(),
+			},
+			wantErr: false,
+		},
+		{
+			name: "Error: bridge mode with empty bridge name",
+			inputConfig: Config{
+				BinaryPath:          "/bin/echo",
+				SeccompDefaultAction: ActionKill,
+				Storage: StorageConfig{
+					InitialLimitMB:    100,
+					AbsoluteMaximumMB: 500,
+					ExpansionPolicy:   "none",
+					IncrementStepMB:   0,
+				},
+				NetworkMode: network.Bridge,
+				BridgeConfig: network.BridgeConfig{
+					BridgeName: "",
+					Subnet:     "10.0.0.0/24", GatewayIP: "10.0.0.1",
+					ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0",
+				},
+			},
+			wantErr:     true,
+			errContains: "bridge config: bridge_name cannot be empty",
+		},
+		{
 			name: "Error: no binary_path and no command",
 			inputConfig: Config{
 				SeccompDefaultAction: ActionKill,

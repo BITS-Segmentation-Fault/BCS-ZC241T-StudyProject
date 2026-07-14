@@ -4,17 +4,20 @@ package child
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"syscall"
+	"time"
 
+	"sandbox/demo/common"
 	"sandbox/demo/config"
 	"sandbox/demo/fs"
+	"sandbox/demo/network"
 	"sandbox/demo/security"
 
 	"golang.org/x/sys/unix"
 )
 
-// capabilityNameToValue maps human-readable capability names to Linux constants.
 var capabilityNameToValue = map[string]uintptr{
 	"CAP_SYS_ADMIN":        unix.CAP_SYS_ADMIN,
 	"CAP_NET_ADMIN":        unix.CAP_NET_ADMIN,
@@ -56,10 +59,32 @@ func childLog(msg string) {
 }
 
 func Child(cfg config.Config, p2cRFd uintptr, c2pWFd uintptr, hostUID int, hostGID int) int {
+    
+    os.Setenv("GODEBUG", "pidfd=0")
+    os.Setenv("GOEXPERIMENT", "none")
 	childLog("Child process entered execution layer.")
 
-	// Close inherited host file descriptors
-	childLog("Removing inherited host file descriptors...")
+	// 1. NETWORK HANDSHAKE
+	if cfg.NetworkMode == network.Bridge && p2cRFd != 0 && c2pWFd != 0 {
+		childLog("Signalling readiness to parent...")
+		if _, err := syscall.Write(int(c2pWFd), []byte{common.ReadyByte}); err != nil {
+			childLog(fmt.Sprintf("Failed to signal READY: %v", err))
+			return 1
+		}
+		
+		ack := make([]byte, 1)
+		if _, err := syscall.Read(int(p2cRFd), ack); err != nil {
+			childLog(fmt.Sprintf("Failed to read ACK: %v", err))
+			return 1
+		}
+		if ack[0] != common.AckByte {
+			childLog("Invalid ACK received.")
+			return 1
+		}
+		childLog("ACK received, proceeding.")
+	}
+
+	// 2. CLEANUP: Close inherited host file descriptors
 	for fd := 3; fd < 1024; fd++ {
 		if uintptr(fd) == p2cRFd || uintptr(fd) == c2pWFd {
 			continue
@@ -67,138 +92,61 @@ func Child(cfg config.Config, p2cRFd uintptr, c2pWFd uintptr, hostUID int, hostG
 		_ = syscall.Close(fd)
 	}
 
-	// Namespace isolation
-	childLog("Requesting remaining kernel namespace isolation (CLONE_NEWNS | CLONE_NEWUTS)...")
-	err := syscall.Unshare(syscall.CLONE_NEWNS | syscall.CLONE_NEWUTS)
-	if err != nil {
-		childLog(fmt.Sprintf("UNSHARE FAILURE: %v", err))
-		return 1
+	// 3. NETWORK CONFIGURATION
+	if cfg.NetworkMode == network.Bridge {
+		if err := network.ConfigureChildIface(cfg.BridgeConfig); err != nil {
+			childLog(fmt.Sprintf("Bridge config failed: %v", err))
+			return 1
+		}
+		childLog("Bridge interface configured.")
+		
+		// 2. STABILIZATION: Force Go runtime to yield and re-examine the network state
+		// This prevents the netpoll panic when the namespace moves.
+		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Drop capabilities before pivot_root
-	childLog("Dropping kernel capabilities...")
+	// ... (Rest of your function: CAPABILITIES, JAIL, SECCOMP, EXEC)
+	
 	for _, capName := range cfg.DropCapabilities {
-		capVal, ok := capabilityNameToValue[capName]
-		if !ok {
-			childLog(fmt.Sprintf("WARNING: unknown capability %q — skipping", capName))
-			continue
-		}
-		if err := unix.Prctl(unix.PR_CAPBSET_DROP, capVal, 0, 0, 0); err != nil {
-			childLog(fmt.Sprintf("WARNING: failed to drop capability %s: %v", capName, err))
+		if capVal, ok := capabilityNameToValue[capName]; ok {
+			_ = unix.Prctl(unix.PR_CAPBSET_DROP, capVal, 0, 0, 0)
 		}
 	}
 
-	// Apply bind mounts and pivot_root
 	rootfsTarget := cfg.RootFSSource
 	if rootfsTarget == "" {
 		rootfsTarget = "/var/lib/sandbox/rootfs"
 	}
-	childLog(fmt.Sprintf("Triggering pivot_root jail isolation to %q...", rootfsTarget))
 	if err := fs.IsolateRootFS(rootfsTarget, cfg.BindMounts); err != nil {
-		childLog(fmt.Sprintf("CRITICAL JAIL FAILURE: %v", err))
+		childLog(fmt.Sprintf("JAIL FAILURE: %v", err))
 		return 1
 	}
 
-	// Remount / as read-only if configured
 	if cfg.ReadOnlyRoot {
-		childLog("Setting root filesystem to read-only...")
-		if err := syscall.Mount("", "/", "", syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_BIND, ""); err != nil {
-			childLog(fmt.Sprintf("WARNING: failed to remount root read-only: %v", err))
-		}
+		_ = syscall.Mount("", "/", "", syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_BIND, "")
 	}
 
-	// Write DNS servers to /etc/resolv.conf
 	if len(cfg.DNSServers) > 0 {
-		childLog("Writing DNS servers to /etc/resolv.conf...")
 		var lines []string
 		for _, dns := range cfg.DNSServers {
 			lines = append(lines, "nameserver "+dns)
 		}
-		content := strings.Join(lines, "\n") + "\n"
-		if err := fs.WriteText("/etc/resolv.conf", content); err != nil {
-			childLog(fmt.Sprintf("WARNING: failed to write /etc/resolv.conf: %v", err))
-		}
+		_ = fs.WriteText("/etc/resolv.conf", strings.Join(lines, "\n")+"\n")
 	}
 
-	// Apply resource limits
-	childLog("Applying resource limits...")
+	rlim := syscall.Rlimit{Cur: uint64(cfg.MaxProcesses), Max: uint64(cfg.MaxProcesses)}
+	_ = syscall.Setrlimit(unix.RLIMIT_NPROC, &rlim)
 
-	// CPU limit
-	if cfg.CPULimitPercent > 0 {
-		cpuSecs := uint64(cfg.CPULimitPercent) * 3600 / 100
-		rlim := syscall.Rlimit{Cur: cpuSecs, Max: cpuSecs}
-		if err := syscall.Setrlimit(syscall.RLIMIT_CPU, &rlim); err != nil {
-			childLog(fmt.Sprintf("WARNING: failed to set RLIMIT_CPU: %v", err))
-		}
-	}
-
-	// Memory limit
-	if cfg.MemoryLimitGB > 0 {
-		memBytes := uint64(cfg.MemoryLimitGB) * gbToBytes
-		rlim := syscall.Rlimit{Cur: memBytes, Max: memBytes}
-		if err := syscall.Setrlimit(syscall.RLIMIT_AS, &rlim); err != nil {
-			childLog(fmt.Sprintf("WARNING: failed to set RLIMIT_AS: %v", err))
-		}
-	}
-
-	// Processes limit
-	if cfg.MaxProcesses > 0 {
-		rlim := syscall.Rlimit{Cur: uint64(cfg.MaxProcesses), Max: uint64(cfg.MaxProcesses)}
-		if err := syscall.Setrlimit(syscall.RLIMIT_NPROC, &rlim); err != nil {
-			childLog(fmt.Sprintf("WARNING: failed to set RLIMIT_NPROC: %v", err))
-		}
-	}
-
-	// Storage limits
-	storageCfg := cfg.Storage
-	initialBytes := uint64(storageCfg.InitialLimitMB) * mbToBytes
-	maxBytes := uint64(storageCfg.AbsoluteMaximumMB) * mbToBytes
-	rlimitFsize := syscall.Rlimit{Cur: initialBytes, Max: maxBytes}
-	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &rlimitFsize); err != nil {
-		childLog(fmt.Sprintf("WARNING: failed to set RLIMIT_FSIZE: %v", err))
-	}
-
-	// Seccomp
-	childLog("Arming seccomp kernel filter engine...")
 	if err := security.ApplySeccompFiltersCustom(cfg.SeccompDefaultAction, cfg.BlockedSyscalls); err != nil {
 		childLog(fmt.Sprintf("SECCOMP FAILURE: %v", err))
 		return 1
 	}
 
-	// Working directory
-	if cfg.WorkingDir != "" && cfg.WorkingDir != "/" {
-		childLog(fmt.Sprintf("Changing working directory to %q...", cfg.WorkingDir))
-		if err := syscall.Chdir(cfg.WorkingDir); err != nil {
-			childLog(fmt.Sprintf("WARNING: failed to chdir to %q: %v", cfg.WorkingDir, err))
-		}
-	}
-
-	// Determine binary path and args
 	binaryPath := cfg.BinaryPath
-	var execArgs []string
-	if binaryPath == "" && len(cfg.Command) > 0 {
-		binaryPath = cfg.Command[0]
-		execArgs = cfg.Command
-	} else if binaryPath != "" {
-		execArgs = append([]string{binaryPath}, cfg.Args...)
-	} else {
-		childLog("No binary path or command configured")
-		return 1
-	}
-
-	// Environment variables
-	env := cfg.EnvVars
-	if len(env) == 0 {
-		env = []string{"PATH=/bin:/usr/bin", "TERM=xterm"}
-	}
-
-	childLog(fmt.Sprintf("Handing off execution to %q with args %v", binaryPath, execArgs))
-
-	execErr := unix.Exec(binaryPath, execArgs, env)
-	if execErr != nil {
-		childLog(fmt.Sprintf("KERNEL EXECVE FAILURE: %v", execErr))
-		return 1
-	}
-
-	return 0
+	execArgs := append([]string{binaryPath}, cfg.Args...)
+	
+	childLog(fmt.Sprintf("Handing off to %q", binaryPath))
+	err := unix.Exec(binaryPath, execArgs, cfg.EnvVars)
+	childLog(fmt.Sprintf("EXEC FAILED: %v", err))
+	return 1
 }

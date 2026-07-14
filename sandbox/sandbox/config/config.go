@@ -55,6 +55,7 @@ type Config struct {
 	MemoryLimitGB        int                 `yaml:"memory_limit_gb"`
 	MaxProcesses         int                 `yaml:"max_processes"`
 	NetworkMode          network.NetworkMode `yaml:"network_mode"`
+	BridgeConfig         network.BridgeConfig `yaml:"bridge"`
 	WorkingDir           string              `yaml:"working_dir"`
 	RootFSSource         string              `yaml:"rootfs_source"`
 	BindMounts           []BindMount         `yaml:"bind_mounts"`
@@ -84,6 +85,7 @@ func DefaultConfig() Config {
 		MemoryLimitGB:   1,
 		MaxProcesses:    100,
 		NetworkMode:     network.None,
+		BridgeConfig:    network.DefaultBridgeConfig(),
 		WorkingDir:      "/",
 		RootFSSource:    "/var/lib/sandbox/rootfs",
 		BindMounts:      []BindMount{},
@@ -97,6 +99,12 @@ func DefaultConfig() Config {
 func (c *Config) Validate() error {
 	if !c.NetworkMode.IsValid() {
 		return fmt.Errorf("value_error: invalid network mode %q", c.NetworkMode)
+	}
+
+	if c.NetworkMode == network.Bridge {
+		if err := c.BridgeConfig.Validate(); err != nil {
+			return fmt.Errorf("value_error: bridge config: %v", err)
+		}
 	}
 
 	if c.BinaryPath != "" {
