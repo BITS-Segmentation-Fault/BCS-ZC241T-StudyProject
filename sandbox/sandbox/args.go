@@ -127,12 +127,13 @@ func validateFlagTokens(argv []string) (map[string]bool, error) {
 func ParseArgs(argv []string) (Args, error) {
 	// Pass one uses the built-in defaults only to discover --config and validate
 	// the complete public option stream. It is intentionally order-independent.
-	discovered, err := parseCLI(argv, config.DefaultConfig())
+	defaults := config.DefaultConfig()
+	discovered, err := parseCLI(argv, defaults)
 	if err != nil {
 		return Args{}, err
 	}
 
-	baseCfg := config.DefaultConfig()
+	baseCfg := defaults
 	if *discovered.values.configPath != "" {
 		loaded, err := config.LoadConfig(*discovered.values.configPath)
 		if err != nil {

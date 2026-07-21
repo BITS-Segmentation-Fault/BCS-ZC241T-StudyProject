@@ -150,11 +150,21 @@ func TestMain_CLIParityMatrix(t *testing.T) {
 				return
 			}
 
-			if !reflect.DeepEqual(got, tt.want) {
+			if !equalArgsIgnoringGeneratedBridgeNames(got, tt.want) {
 				t.Errorf("ParseArgs() output discrepancy:\ngot  = %+v\nwant = %+v", got, tt.want)
 			}
 		})
 	}
+}
+
+func equalArgsIgnoringGeneratedBridgeNames(got, want Args) bool {
+	got.Config.BridgeConfig.BridgeName = ""
+	got.Config.BridgeConfig.HostVethName = ""
+	got.Config.BridgeConfig.NSVethName = ""
+	want.Config.BridgeConfig.BridgeName = ""
+	want.Config.BridgeConfig.HostVethName = ""
+	want.Config.BridgeConfig.NSVethName = ""
+	return reflect.DeepEqual(got, want)
 }
 
 func TestParseArgs_PreservesConfigValuesWithoutCLIOverrides(t *testing.T) {
