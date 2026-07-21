@@ -43,26 +43,76 @@ type BindMount struct {
 
 // Representation of the full structural runtime parameters for the sandbox container.
 type Config struct {
-	BinaryPath           string              `yaml:"binary_path"`
-	Args                 []string            `yaml:"args"`
-	EnvVars              []string            `yaml:"env_vars"`
-	ReadOnlyRoot         bool                `yaml:"read_only_root"`
-	SeccompDefaultAction SeccompAction       `yaml:"seccomp_default_action"`
-	BlockedSyscalls      []string            `yaml:"blocked_syscalls"`
-	DropCapabilities     []string            `yaml:"drop_capabilities"`
-	Storage              StorageConfig       `yaml:"storage"`
-	CPULimitPercent      int                 `yaml:"cpu_limit_percent"`
-	MemoryLimitGB        int                 `yaml:"memory_limit_gb"`
-	MaxProcesses         int                 `yaml:"max_processes"`
-	NetworkMode          network.NetworkMode `yaml:"network_mode"`
+	BinaryPath           string               `yaml:"binary_path"`
+	Args                 []string             `yaml:"args"`
+	EnvVars              []string             `yaml:"env_vars"`
+	ReadOnlyRoot         bool                 `yaml:"read_only_root"`
+	SeccompDefaultAction SeccompAction        `yaml:"seccomp_default_action"`
+	BlockedSyscalls      []string             `yaml:"blocked_syscalls"`
+	DropCapabilities     []string             `yaml:"drop_capabilities"`
+	Storage              StorageConfig        `yaml:"storage"`
+	CPULimitPercent      int                  `yaml:"cpu_limit_percent"`
+	MemoryLimitGB        int                  `yaml:"memory_limit_gb"`
+	MaxProcesses         int                  `yaml:"max_processes"`
+	NetworkMode          network.NetworkMode  `yaml:"network_mode"`
 	BridgeConfig         network.BridgeConfig `yaml:"bridge"`
-	WorkingDir           string              `yaml:"working_dir"`
-	RootFSSource         string              `yaml:"rootfs_source"`
-	BindMounts           []BindMount         `yaml:"bind_mounts"`
-	DNSServers           []string            `yaml:"dns_servers"`
+	WorkingDir           string               `yaml:"working_dir"`
+	RootFSSource         string               `yaml:"rootfs_source"`
+	BindMounts           []BindMount          `yaml:"bind_mounts"`
+	DNSServers           []string             `yaml:"dns_servers"`
 
 	Command      []string `yaml:"command"`
 	EnvWhitelist []string `yaml:"env_whitelist"`
+}
+
+// CommandLine returns the single configured executable form used by the child.
+func (c Config) CommandLine() []string {
+	if c.BinaryPath != "" {
+		command := make([]string, 0, len(c.Args)+1)
+		command = append(command, c.BinaryPath)
+		command = append(command, c.Args...)
+		return command
+	}
+	return append([]string(nil), c.Command...)
+}
+
+// Environment combines explicit values with only the allowlisted host values.
+func (c Config) Environment(hostEnvironment []string) []string {
+	result := make([]string, 0, len(c.EnvVars)+len(c.EnvWhitelist))
+	seen := make(map[string]struct{}, len(c.EnvVars)+len(c.EnvWhitelist))
+	for _, entry := range c.EnvVars {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, exists := seen[key]; exists {
+			for i, previous := range result {
+				if previousKey, _, _ := strings.Cut(previous, "="); previousKey == key {
+					result[i] = entry
+					break
+				}
+			}
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, entry)
+	}
+	allowed := make(map[string]struct{}, len(c.EnvWhitelist))
+	for _, key := range c.EnvWhitelist {
+		allowed[key] = struct{}{}
+	}
+	for _, entry := range hostEnvironment {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		if _, ok := allowed[key]; !ok {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, entry)
+	}
+	return result
 }
 
 // Provide secure baseline parameters that maximise host protection.

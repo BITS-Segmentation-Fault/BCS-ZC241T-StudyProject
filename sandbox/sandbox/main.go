@@ -3,70 +3,88 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"strconv"
 	"strings"
 
+	"golang.org/x/sys/unix"
 	"sandbox/sandbox/child"
 	"sandbox/sandbox/parent"
 )
 
+const (
+	internalChildMarker = "--internal-child"
+	childReadFD         = 3
+	childWriteFD        = 4
+)
+
 func main() {
-	isChild := false
-	childReadFd := 0
-	childWriteFd := 0
-	var filtered []string
-	for _, arg := range os.Args[1:] {
-		if arg == "-child" {
-			isChild = true
-		} else if strings.HasPrefix(arg, "--child-read-fd=") {
-			val := strings.TrimPrefix(arg, "--child-read-fd=")
-			if n, err := strconv.Atoi(val); err == nil {
-				childReadFd = n
-			}
-		} else if strings.HasPrefix(arg, "--child-write-fd=") {
-			val := strings.TrimPrefix(arg, "--child-write-fd=")
-			if n, err := strconv.Atoi(val); err == nil {
-				childWriteFd = n
-			}
-		} else {
-			filtered = append(filtered, arg)
-		}
-	}
-
-	parsed, err := ParseArgs(filtered)
+	internal, publicArgs, err := splitInternalInvocation(os.Args[1:])
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
+		fatal(err)
 	}
 
-	cfg := parsed.Config
+	parsed, err := ParseArgs(publicArgs)
+	if err != nil {
+		fatal(err)
+	}
 
-	if isChild {
-		// FIX: Re-exec the child process with GODEBUG=pidfd=0 and GOEXPERIMENT=none
-		// to prevent the Go runtime from attempting to use features incompatible 
-		// with restricted network namespaces.
-		if os.Getenv("GODEBUG") != "pidfd=0" {
-			cmd := exec.Command("/proc/self/exe", os.Args[1:]...)
-			cmd.Env = append(os.Environ(), "GODEBUG=pidfd=0", "GOEXPERIMENT=none")
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-			cmd.Stdin = os.Stdin
-
-			// This replaces the current process with a new one that has the correct env
-			err := cmd.Run()
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Re-exec failed: %v\n", err)
-				os.Exit(1)
-			}
-			os.Exit(0)
+	if internal {
+		if err := validateInternalChild(); err != nil {
+			fatal(err)
 		}
-
-		// If we are here, we are already re-exec'd with the right envs
-		rc := child.Child(cfg, uintptr(childReadFd), uintptr(childWriteFd), 0, 0)
-		os.Exit(rc)
-	} else {
-		rc := parent.Parent(cfg)
-		os.Exit(rc)
+		os.Exit(child.Child(parsed.Config, childReadFD, childWriteFD))
 	}
+
+	os.Exit(parent.Parent(parsed.Config, publicArgs))
+}
+
+func splitInternalInvocation(argv []string) (bool, []string, error) {
+	if len(argv) > 0 && argv[0] == internalChildMarker {
+		return true, append([]string(nil), argv[1:]...), nil
+	}
+	for _, arg := range argv {
+		if arg == internalChildMarker {
+			return false, nil, fmt.Errorf("internal child marker must be the first argument")
+		}
+	}
+	return false, append([]string(nil), argv...), nil
+}
+
+func validateInternalChild() error {
+	if os.Getpid() != 1 {
+		return fmt.Errorf("internal child invocation requires PID 1 in a new PID namespace")
+	}
+	for _, fd := range []int{childReadFD, childWriteFD} {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil {
+			return fmt.Errorf("internal child descriptor %d is unavailable: %v", fd, err)
+		}
+	}
+	return nil
+}
+
+func fatal(err error) {
+	if err == nil {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+	os.Exit(1)
+}
+
+func withEnvironment(environment []string, key, value string) []string {
+	prefix := key + "="
+	updated := make([]string, 0, len(environment)+1)
+	found := false
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, prefix) {
+			if !found {
+				updated = append(updated, prefix+value)
+				found = true
+			}
+			continue
+		}
+		updated = append(updated, entry)
+	}
+	if !found {
+		updated = append(updated, prefix+value)
+	}
+	return updated
 }

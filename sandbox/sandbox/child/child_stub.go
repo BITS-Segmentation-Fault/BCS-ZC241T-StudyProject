@@ -7,7 +7,7 @@ import (
 	"sandbox/sandbox/config"
 )
 
-func Child(cfg config.Config, p2cR, c2pW uintptr, hostUID, hostGID int) int {
+func Child(cfg config.Config, p2cR, c2pW int) int {
 	log.Println("[WARN] Container namespaces are only supported natively on Linux platforms.")
 	return 0
 }
