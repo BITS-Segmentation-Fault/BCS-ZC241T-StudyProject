@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"sandbox/demo/config"
+	"sandbox/sandbox/config"
 )
 
 const mbToBytes = 1024 * 1024

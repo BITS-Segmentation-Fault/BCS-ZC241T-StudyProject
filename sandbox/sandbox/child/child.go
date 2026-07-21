@@ -9,11 +9,11 @@ import (
 	"syscall"
 	"time"
 
-	"sandbox/demo/common"
-	"sandbox/demo/config"
-	"sandbox/demo/fs"
-	"sandbox/demo/network"
-	"sandbox/demo/security"
+	"sandbox/sandbox/common"
+	"sandbox/sandbox/config"
+	"sandbox/sandbox/fs"
+	"sandbox/sandbox/network"
+	"sandbox/sandbox/security"
 
 	"golang.org/x/sys/unix"
 )

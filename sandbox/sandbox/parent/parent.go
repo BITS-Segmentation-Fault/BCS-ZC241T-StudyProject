@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	"sandbox/demo/common"
-	"sandbox/demo/config"
-	"sandbox/demo/network"
+	"sandbox/sandbox/common"
+	"sandbox/sandbox/config"
+	"sandbox/sandbox/network"
 )
 
 const childReadyTimeout = 10 * time.Second

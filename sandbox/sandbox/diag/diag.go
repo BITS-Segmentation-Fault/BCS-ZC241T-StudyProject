@@ -4,8 +4,8 @@ import (
 	"log"
 	"syscall"
 
-	"sandbox/demo/fs"
-	"sandbox/demo/utils"
+	"sandbox/sandbox/fs"
+	"sandbox/sandbox/utils"
 )
 
 var StatusKeys = []string{"Uid:", "Gid:", "Groups:", "CapEff:", "NSpid:"}

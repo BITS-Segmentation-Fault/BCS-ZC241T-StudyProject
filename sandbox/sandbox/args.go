@@ -7,8 +7,8 @@ import (
 	"io"
 	"strings"
 
-	"sandbox/demo/config"
-	"sandbox/demo/network"
+	"sandbox/sandbox/config"
+	"sandbox/sandbox/network"
 )
 
 type Args struct {

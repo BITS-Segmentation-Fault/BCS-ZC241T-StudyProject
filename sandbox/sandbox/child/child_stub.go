@@ -4,7 +4,7 @@ package child
 
 import (
 	"log"
-	"sandbox/demo/config"
+	"sandbox/sandbox/config"
 )
 
 func Child(cfg config.Config, p2cR, c2pW uintptr, hostUID, hostGID int) int {

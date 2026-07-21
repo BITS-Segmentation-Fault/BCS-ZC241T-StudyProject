@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"sandbox/demo/network"
+	"sandbox/sandbox/network"
 )
 
 func TestConfig_ValidationAndParity(t *testing.T) {

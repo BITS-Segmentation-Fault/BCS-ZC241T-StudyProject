@@ -8,7 +8,7 @@ import (
 	"os"
 	"syscall"
 
-	"sandbox/demo/config"
+	"sandbox/sandbox/config"
 )
 
 // Seal the child process inside a designated root filesystem directory tree,

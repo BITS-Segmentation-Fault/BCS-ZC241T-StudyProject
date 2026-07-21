@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"sandbox/demo/network"
+	"sandbox/sandbox/network"
 )
 
 // Define the three-tiered progressive storage allocation parameters.

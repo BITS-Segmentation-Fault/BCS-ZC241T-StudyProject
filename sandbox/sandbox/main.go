@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"sandbox/demo/child"
-	"sandbox/demo/parent"
+	"sandbox/sandbox/child"
+	"sandbox/sandbox/parent"
 )
 
 func main() {

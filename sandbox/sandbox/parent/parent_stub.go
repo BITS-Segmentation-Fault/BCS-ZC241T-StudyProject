@@ -4,7 +4,7 @@ package parent
 
 import (
 	"log"
-	"sandbox/demo/config"
+	"sandbox/sandbox/config"
 )
 
 func Parent(cfg config.Config) int {

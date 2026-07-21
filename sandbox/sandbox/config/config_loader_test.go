@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"sandbox/demo/network"
+	"sandbox/sandbox/network"
 )
 
 func TestLoadConfigFromReader(t *testing.T) {
