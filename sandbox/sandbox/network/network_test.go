@@ -154,6 +154,7 @@ func TestBridgeConfig_Validate_Valid(t *testing.T) {
 		HostVethName:   "veth-host",
 		NSVethName:     "veth-ns",
 		ContainerIface: "eth0",
+		MTU:            1500,
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate() error = %v", err)
@@ -200,6 +201,21 @@ func TestBridgeConfig_Validate_Invalid(t *testing.T) {
 			name:    "empty container iface",
 			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: ""},
 			errPart: "container_iface",
+		},
+		{
+			name:    "gateway outside subnet",
+			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "10.0.1.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0", MTU: 1500},
+			errPart: "belong to subnet",
+		},
+		{
+			name:    "interface name too long",
+			cfg:     BridgeConfig{BridgeName: "this-name-is-too-long", Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0", MTU: 1500},
+			errPart: "interface-name limit",
+		},
+		{
+			name:    "invalid MTU",
+			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0", MTU: 1},
+			errPart: "mtu",
 		},
 	}
 	for _, tt := range tests {
