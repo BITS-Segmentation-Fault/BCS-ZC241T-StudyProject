@@ -1,59 +1,68 @@
 # BCS ZC241T StudyProject
 
-## How to run and/or build the demo
+## Go sandbox
 
-### CLI help/usage
+The active sandbox is the standalone Go module in `sandbox/sandbox`. Bazel is
+an integration and packaging layer; ordinary Go tooling is the authoritative
+build and test workflow.
 
-```
-usage: main.py [-h] [--network-mode NETWORK_MODE] [--verbose] command [command ...]
-
-positional arguments:
-  command               Command to execute inside the sandbox.
-
-options:
-  -h, --help            show this help message and exit
-  --network-mode NETWORK_MODE
-                        Set to "none" to disable internet access. Default: "host" (no network restrictions).
-  --verbose
-```
-
-### Developer run workflow
+From the module directory:
 
 ```bash
-bazel run //sandbox:demo -- <options>
+cd sandbox/sandbox
+go build ./...
+go test ./...
+go vet ./...
+go run . -- --network-mode=none -- /bin/echo "hello world"
 ```
 
-### Production build workflow
+Use a temporary output path when a standalone executable is needed:
 
 ```bash
-bazel build //sandbox:demo_precompiled_zipapp
+go build -o "${TMPDIR:-/tmp}/sandbox" .
 ```
 
-Run the built Python zipapp binary:
+Bazel mirrors the module and packages the executable without writing build
+outputs into the source tree:
 
 ```bash
-python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz <options>
+bazel build //sandbox:sandbox
+bazel test //sandbox:sandbox_tests
+bazel build //pkg:study_project_dist
 ```
 
-### Examples
+The distribution archive contains the executable at `sandbox/sandbox` with
+its executable permission preserved.
 
-1. Hello, world!
-   ```bash
-   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz -- echo "hello world"
-   ```
-2. `id` command
-   ```bash
-   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz -- id
-   ```
-3. internet on (default)
-   ```bash
-   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz -- nslookup google.com
-   ```
-4. internet off (network mode = "none")
-   ```bash
-   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz --network-mode=none -- nslookup google.com
-   ```
-5. verbose logging (`true` is a linux command that exits with code 0)
-   ```bash
-   python3 ./bazel-bin/sandbox/demo/demo_precompiled_zipapp.pyz --verbose -- true
-   ```
+## Platform and runtime requirements
+
+The program is Linux-only. Host and none modes are designed to work without
+global root when unprivileged user namespaces, mount namespaces, PID/UTS
+namespaces, `pivot_root`, `openat2`, seccomp, and the required kernel policy
+are available. The configured rootfs must contain the command and its runtime
+files; statically linked payloads are the simplest option. `/proc` is mounted
+by the sandbox.
+
+Bridge mode additionally requires root or `CAP_NET_ADMIN`, the `ip` command,
+and `iptables`. It creates uniquely named links and owned NAT rules and rolls
+back only resources created by that run. CPU limits from 1 through 100 require
+a delegated CPU controller in a writable cgroup-v2 hierarchy; `0` disables
+the CPU limit. If that controller is unavailable, configure
+`cpu_limit_percent: 0` or provide the required delegation.
+
+The default security policy drops `ALL` capabilities and uses a killing
+seccomp policy. Configuration names are validated before a child or bridge is
+created. Use `--config PATH` for YAML settings; public flags must precede the
+command, and `--` explicitly terminates the flag section.
+
+Storage uses `RLIMIT_FSIZE`, which is a per-file size limit rather than a
+total disk quota. The initial limit is applied as both the soft and hard
+ceiling. The historical maximum and expansion fields remain parse-compatible,
+but expansion policies are rejected.
+
+## Frozen Python demo
+
+The original Python proof-of-concept is frozen in `sandbox/demo`. Its Bazel
+targets and usage instructions are documented separately in
+[sandbox/demo/README.md](sandbox/demo/README.md). The frozen demo is not the
+implementation or package entrypoint for the Go sandbox.
