@@ -1,6 +1,23 @@
 package(default_visibility = ["//visibility:public"])
 
 alias(
+    name = "sandbox",
+    actual = "//sandbox/sandbox:sandbox",
+)
+
+test_suite(
+    name = "sandbox_tests",
+    tests = [
+        "//sandbox/sandbox:sandbox_test",
+        "//sandbox/sandbox:config_test",
+        "//sandbox/sandbox:fs_test",
+        "//sandbox/sandbox:idmap_test",
+        "//sandbox/sandbox:network_test",
+        "//sandbox/sandbox:utils_test",
+    ],
+)
+
+alias(
     name = "demo",
     actual = "//sandbox/demo:demo",
 )

@@ -1,25 +1,160 @@
-load("@io_bazel_rules_go//go:def.bzl", "go_binary", "go_library")
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+package(default_visibility = ["//sandbox:__subpackages__"])
 
 go_library(
-    name = "demo_lib",
-    srcs = [
-        "main.go",
-        "args.go",
-    ],
-    importpath = "sandbox/demo",
-    visibility = ["//visibility:private"],
+    name = "common",
+    srcs = ["common/common.go"],
+    importpath = "sandbox/sandbox/common",
+)
+
+go_library(
+    name = "network",
+    srcs = glob(["network/*.go"], exclude = ["network/*_test.go"]),
+    importpath = "sandbox/sandbox/network",
+)
+
+go_library(
+    name = "config",
+    srcs = glob(["config/*.go"], exclude = ["config/*_test.go"]),
+    importpath = "sandbox/sandbox/config",
     deps = [
-        "//config",
-        "//network",
-        "//parent",
-        "//child",
-        "//common",
-        "//utils",
+        ":network",
+        "@in_gopkg_yaml_v3//:go_default_library",
+    ],
+)
+
+go_library(
+    name = "fs",
+    srcs = glob(["fs/*.go"], exclude = ["fs/*_test.go"]),
+    importpath = "sandbox/sandbox/fs",
+    deps = [":config"],
+)
+
+go_library(
+    name = "idmap",
+    srcs = ["idmap/idmap.go"],
+    importpath = "sandbox/sandbox/idmap",
+    deps = [":fs"],
+)
+
+go_library(
+    name = "diag",
+    srcs = ["diag/diag.go"],
+    importpath = "sandbox/sandbox/diag",
+    deps = [
+        ":fs",
+        ":utils",
+    ],
+)
+
+go_library(
+    name = "resources",
+    srcs = ["resources/storage.go"],
+    importpath = "sandbox/sandbox/resources",
+    deps = [":config"],
+)
+
+go_library(
+    name = "security",
+    srcs = ["security/seccomp.go"],
+    importpath = "sandbox/sandbox/security",
+    deps = [
+        ":config",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
+go_library(
+    name = "utils",
+    srcs = ["utils/utils.go"],
+    importpath = "sandbox/sandbox/utils",
+)
+
+go_library(
+    name = "child",
+    srcs = glob(["child/*.go"], exclude = ["child/*_test.go"]),
+    importpath = "sandbox/sandbox/child",
+    deps = [
+        ":common",
+        ":config",
+        ":fs",
+        ":network",
+        ":security",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
+go_library(
+    name = "parent",
+    srcs = glob(["parent/*.go"], exclude = ["parent/*_test.go"]),
+    importpath = "sandbox/sandbox/parent",
+    deps = [
+        ":common",
+        ":config",
+        ":network",
     ],
 )
 
 go_binary(
-    name = "demo",
-    embed = [":demo_lib"],
-    visibility = ["//sandbox:__subpackages__"],
+    name = "sandbox",
+    srcs = ["main.go", "args.go"],
+    deps = [
+        ":child",
+        ":common",
+        ":config",
+        ":network",
+        ":parent",
+        ":utils",
+    ],
+)
+
+go_test(
+    name = "sandbox_test",
+    srcs = ["main.go", "args.go", "main_test.go"],
+    importpath = "sandbox/sandbox",
+    deps = [
+        ":child",
+        ":common",
+        ":config",
+        ":network",
+        ":parent",
+        ":utils",
+    ],
+)
+
+go_test(
+    name = "config_test",
+    srcs = glob(["config/*.go"]),
+    importpath = "sandbox/sandbox/config",
+    deps = [
+        ":network",
+        "@in_gopkg_yaml_v3//:go_default_library",
+    ],
+)
+
+go_test(
+    name = "fs_test",
+    srcs = glob(["fs/*.go"]),
+    importpath = "sandbox/sandbox/fs",
+    deps = [":config"],
+)
+
+go_test(
+    name = "idmap_test",
+    srcs = ["idmap/idmap.go", "idmap/idmap_test.go"],
+    importpath = "sandbox/sandbox/idmap",
+    deps = [":fs"],
+)
+
+go_test(
+    name = "network_test",
+    srcs = glob(["network/*.go"]),
+    importpath = "sandbox/sandbox/network",
+)
+
+go_test(
+    name = "utils_test",
+    srcs = glob(["utils/*.go"]),
+    importpath = "sandbox/sandbox/utils",
 )

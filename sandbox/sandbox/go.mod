@@ -1,4 +1,4 @@
-module sandbox/demo
+module sandbox/sandbox
 
 go 1.26.3
 

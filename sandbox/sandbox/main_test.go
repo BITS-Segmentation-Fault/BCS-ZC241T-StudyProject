@@ -5,8 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"sandbox/demo/config"
-	"sandbox/demo/network"
+	"sandbox/sandbox/config"
+	"sandbox/sandbox/network"
 )
 
 func TestMain_CLIParityMatrix(t *testing.T) {

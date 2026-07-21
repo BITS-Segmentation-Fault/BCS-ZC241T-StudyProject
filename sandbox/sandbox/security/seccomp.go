@@ -8,7 +8,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"sandbox/demo/config"
+	"sandbox/sandbox/config"
 
 	"golang.org/x/sys/unix"
 )
