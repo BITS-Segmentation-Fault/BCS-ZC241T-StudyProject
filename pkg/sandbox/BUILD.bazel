@@ -1,10 +1,11 @@
-load("@rules_pkg//pkg:mappings.bzl", "pkg_files")
+load("@rules_pkg//pkg:mappings.bzl", "pkg_attributes", "pkg_files")
 
 pkg_files(
     name = "bundle",
     srcs = [
-        "//sandbox:demo_precompiled_zipapp",
+        "//sandbox:sandbox",
     ],
+    attributes = pkg_attributes(mode = "0755"),
     prefix = "sandbox",
     visibility = ["//pkg:__subpackages__"],
 )
