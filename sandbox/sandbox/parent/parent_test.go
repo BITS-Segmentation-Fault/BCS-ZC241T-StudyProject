@@ -15,7 +15,7 @@ func TestWaitForChild_ReturnsChildExitCode(t *testing.T) {
 		t.Fatalf("start child: %v", err)
 	}
 
-	if got := waitForChild(cmd, nil, config.DefaultConfig()); got != 7 {
+	if got := waitForChild(cmd, nil, config.DefaultConfig(), nil); got != 7 {
 		t.Fatalf("waitForChild() = %d, want 7", got)
 	}
 }
@@ -26,7 +26,7 @@ func TestWaitForChild_ReturnsSuccess(t *testing.T) {
 		t.Fatalf("start child: %v", err)
 	}
 
-	if got := waitForChild(cmd, nil, config.DefaultConfig()); got != 0 {
+	if got := waitForChild(cmd, nil, config.DefaultConfig(), nil); got != 0 {
 		t.Fatalf("waitForChild() = %d, want 0", got)
 	}
 }
@@ -36,7 +36,7 @@ func TestWaitForChild_ReturnsSignalStatus(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
 	}
-	if got := waitForChild(cmd, nil, config.DefaultConfig()); got != 143 {
+	if got := waitForChild(cmd, nil, config.DefaultConfig(), nil); got != 143 {
 		t.Fatalf("waitForChild() = %d, want 143", got)
 	}
 }

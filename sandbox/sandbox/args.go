@@ -9,6 +9,7 @@ import (
 
 	"sandbox/sandbox/config"
 	"sandbox/sandbox/network"
+	"sandbox/sandbox/security"
 )
 
 type Args struct {
@@ -152,7 +153,8 @@ func ParseArgs(argv []string) (Args, error) {
 	if parsed.seen["network-mode"] {
 		cfg.NetworkMode = network.NetworkMode(*values.networkMode)
 		if !cfg.NetworkMode.IsValid() {
-			return Args{}, fmt.Errorf("value_error: invalid network mode %q", cfg.NetworkMode)
+			_, err := network.ParseNetworkMode(*values.networkMode)
+			return Args{}, err
 		}
 	}
 	if parsed.seen["bridge-subnet"] {
@@ -194,6 +196,9 @@ func ParseArgs(argv []string) (Args, error) {
 
 	if err := cfg.Validate(); err != nil {
 		return Args{}, err
+	}
+	if err := security.ValidateSyscallNames(cfg.BlockedSyscalls); err != nil {
+		return Args{}, fmt.Errorf("value_error: %v", err)
 	}
 	return Args{Config: cfg, Verbose: *values.verbose}, nil
 }

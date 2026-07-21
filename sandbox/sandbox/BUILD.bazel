@@ -28,7 +28,10 @@ go_library(
     name = "fs",
     srcs = glob(["fs/*.go"], exclude = ["fs/*_test.go"]),
     importpath = "sandbox/sandbox/fs",
-    deps = [":config"],
+    deps = [
+        ":config",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
 )
 
 go_library(
@@ -50,14 +53,14 @@ go_library(
 
 go_library(
     name = "resources",
-    srcs = ["resources/storage.go"],
+    srcs = glob(["resources/*.go"], exclude = ["resources/*_test.go"]),
     importpath = "sandbox/sandbox/resources",
     deps = [":config"],
 )
 
 go_library(
     name = "security",
-    srcs = ["security/seccomp.go"],
+    srcs = glob(["security/*.go"], exclude = ["security/*_test.go"]),
     importpath = "sandbox/sandbox/security",
     deps = [
         ":config",
@@ -80,6 +83,7 @@ go_library(
         ":config",
         ":fs",
         ":network",
+        ":resources",
         ":security",
         "@org_golang_x_sys//unix:go_default_library",
     ],
@@ -93,6 +97,7 @@ go_library(
         ":common",
         ":config",
         ":network",
+        ":resources",
     ],
 )
 
@@ -105,6 +110,7 @@ go_binary(
         ":config",
         ":network",
         ":parent",
+        ":security",
         ":utils",
         "@org_golang_x_sys//unix:go_default_library",
     ],
@@ -120,6 +126,7 @@ go_test(
         ":config",
         ":network",
         ":parent",
+        ":security",
         ":utils",
         "@org_golang_x_sys//unix:go_default_library",
     ],
@@ -139,7 +146,10 @@ go_test(
     name = "fs_test",
     srcs = glob(["fs/*.go"]),
     importpath = "sandbox/sandbox/fs",
-    deps = [":config"],
+    deps = [
+        ":config",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
 )
 
 go_test(
@@ -169,5 +179,38 @@ go_test(
         ":common",
         ":config",
         ":network",
+        ":resources",
+    ],
+)
+
+go_test(
+    name = "child_test",
+    srcs = glob(["child/*.go"]),
+    importpath = "sandbox/sandbox/child",
+    deps = [
+        ":common",
+        ":config",
+        ":fs",
+        ":network",
+        ":resources",
+        ":security",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
+go_test(
+    name = "resources_test",
+    srcs = glob(["resources/*.go"]),
+    importpath = "sandbox/sandbox/resources",
+    deps = [":config"],
+)
+
+go_test(
+    name = "security_test",
+    srcs = glob(["security/*.go"]),
+    importpath = "sandbox/sandbox/security",
+    deps = [
+        ":config",
+        "@org_golang_x_sys//unix:go_default_library",
     ],
 )

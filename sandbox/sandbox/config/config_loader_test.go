@@ -49,8 +49,8 @@ drop_capabilities:
 storage:
   initial_limit_mb: 200
   absolute_maximum_mb: 1000
-  expansion_policy: automatic
-  increment_step_mb: 50
+  expansion_policy: none
+  increment_step_mb: 0
 cpu_limit_percent: 50
 memory_limit_gb: 2
 max_processes: 50
@@ -208,8 +208,8 @@ read_only_root: false
 seccomp_default_action: allow
 network_mode: host
 storage:
-  expansion_policy: automatic
-  increment_step_mb: 25
+  expansion_policy: none
+  increment_step_mb: 0
 cpu_limit_percent: 75
 memory_limit_gb: 4
 max_processes: 200
@@ -229,11 +229,11 @@ max_processes: 200
 	if cfg.NetworkMode != network.Host {
 		t.Errorf("NetworkMode = %q, want %q", cfg.NetworkMode, network.Host)
 	}
-	if cfg.Storage.ExpansionPolicy != "automatic" {
-		t.Errorf("ExpansionPolicy = %q, want %q", cfg.Storage.ExpansionPolicy, "automatic")
+	if cfg.Storage.ExpansionPolicy != "none" {
+		t.Errorf("ExpansionPolicy = %q, want %q", cfg.Storage.ExpansionPolicy, "none")
 	}
-	if cfg.Storage.IncrementStepMB != 25 {
-		t.Errorf("IncrementStepMB = %d, want 25", cfg.Storage.IncrementStepMB)
+	if cfg.Storage.IncrementStepMB != 0 {
+		t.Errorf("IncrementStepMB = %d, want 0", cfg.Storage.IncrementStepMB)
 	}
 	if cfg.CPULimitPercent != 75 {
 		t.Errorf("CPULimitPercent = %d, want 75", cfg.CPULimitPercent)
