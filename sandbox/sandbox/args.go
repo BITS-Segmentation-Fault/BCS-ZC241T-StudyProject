@@ -16,127 +16,194 @@ type Args struct {
 	Verbose bool
 }
 
-func ParseArgs(argv []string) (Args, error) {
-	// Early parse to detect -config before the full flag set processes
-	earlyFS := flag.NewFlagSet("config-detect", flag.ContinueOnError)
-	earlyFS.SetOutput(io.Discard)
-	configPath := earlyFS.String("config", "", "")
-	_ = earlyFS.Parse(argv)
+type cliValues struct {
+	configPath      *string
+	verbose         *bool
+	networkMode     *string
+	bridgeSubnet    *string
+	bridgeGateway   *string
+	bridgeContainer *string
+	envWhitelist    *string
+	initialStorage  *int
+	maximumStorage  *int
+	storagePolicy   *string
+	storageStep     *int
+}
 
-	// Filter out the -config flag and its values from argv so the main flag set doesn't panic
-	var cleanArgv []string
-	for i := 0; i < len(argv); i++ {
-		if argv[i] == "-config" || argv[i] == "--config" {
-			i++ // Skip the flag's value argument
-			continue
-		}
-		if strings.HasPrefix(argv[i], "-config=") || strings.HasPrefix(argv[i], "--config=") {
-			continue // Skip combined strings like --config=path
-		}
-		cleanArgv = append(cleanArgv, argv[i])
+type parsedCLI struct {
+	values cliValues
+	seen   map[string]bool
+	args   []string
+}
+
+var cliFlagTakesValue = map[string]bool{
+	"config":              true,
+	"network-mode":        true,
+	"bridge-subnet":       true,
+	"bridge-gateway":      true,
+	"bridge-container-ip": true,
+	"env-whitelist":       true,
+	"storage-initial":     true,
+	"storage-max":         true,
+	"storage-policy":      true,
+	"storage-step":        true,
+}
+
+func registerFlags(fs *flag.FlagSet, defaults config.Config) cliValues {
+	return cliValues{
+		configPath:      fs.String("config", "", "Load configuration from a YAML file"),
+		verbose:         fs.Bool("verbose", false, "Enable diagnostic logging"),
+		networkMode:     fs.String("network-mode", string(defaults.NetworkMode), "Network namespace mode"),
+		bridgeSubnet:    fs.String("bridge-subnet", defaults.BridgeConfig.Subnet, "Bridge subnet CIDR"),
+		bridgeGateway:   fs.String("bridge-gateway", defaults.BridgeConfig.GatewayIP, "Bridge gateway address"),
+		bridgeContainer: fs.String("bridge-container-ip", defaults.BridgeConfig.ContainerIP, "Container bridge address"),
+		envWhitelist:    fs.String("env-whitelist", strings.Join(defaults.EnvWhitelist, ","), "Host environment keys to copy"),
+		initialStorage:  fs.Int("storage-initial", defaults.Storage.InitialLimitMB, "Initial file-size limit in MiB"),
+		maximumStorage:  fs.Int("storage-max", defaults.Storage.AbsoluteMaximumMB, "Maximum file-size limit in MiB"),
+		storagePolicy:   fs.String("storage-policy", defaults.Storage.ExpansionPolicy, "Deprecated storage expansion policy"),
+		storageStep:     fs.Int("storage-step", defaults.Storage.IncrementStepMB, "Deprecated storage expansion step"),
+	}
+}
+
+func parseCLI(argv []string, defaults config.Config) (parsedCLI, error) {
+	seen, err := validateFlagTokens(argv)
+	if err != nil {
+		return parsedCLI{}, err
 	}
 
-	var baseCfg config.Config
-	if *configPath != "" {
-		loaded, err := config.LoadConfig(*configPath)
+	fs := flag.NewFlagSet("sandbox", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	values := registerFlags(fs, defaults)
+	if err := fs.Parse(argv); err != nil {
+		return parsedCLI{}, err
+	}
+	return parsedCLI{values: values, seen: seen, args: append([]string(nil), fs.Args()...)}, nil
+}
+
+func validateFlagTokens(argv []string) (map[string]bool, error) {
+	seen := make(map[string]bool)
+	for i := 0; i < len(argv); i++ {
+		arg := argv[i]
+		if arg == "--" || !strings.HasPrefix(arg, "-") || arg == "-" {
+			break
+		}
+
+		nameValue := strings.TrimLeft(arg, "-")
+		name, value, hasValue := strings.Cut(nameValue, "=")
+		if name == "" {
+			return nil, fmt.Errorf("invalid empty option")
+		}
+		if seen[name] {
+			return nil, fmt.Errorf("option --%s was specified more than once", name)
+		}
+		seen[name] = true
+
+		_, known := cliFlagTakesValue[name]
+		if !known {
+			if name == "verbose" {
+				if hasValue && value != "true" && value != "false" {
+					return nil, fmt.Errorf("invalid boolean value for --verbose")
+				}
+				continue
+			}
+			// Let flag.FlagSet produce its standard unknown-option diagnostic.
+			continue
+		}
+		if hasValue {
+			if value == "" {
+				return nil, fmt.Errorf("option --%s requires a value", name)
+			}
+			continue
+		}
+		if i+1 >= len(argv) {
+			return nil, fmt.Errorf("option --%s requires a value", name)
+		}
+		i++
+	}
+	return seen, nil
+}
+
+func ParseArgs(argv []string) (Args, error) {
+	// Pass one uses the built-in defaults only to discover --config and validate
+	// the complete public option stream. It is intentionally order-independent.
+	discovered, err := parseCLI(argv, config.DefaultConfig())
+	if err != nil {
+		return Args{}, err
+	}
+
+	baseCfg := config.DefaultConfig()
+	if *discovered.values.configPath != "" {
+		loaded, err := config.LoadConfig(*discovered.values.configPath)
 		if err != nil {
 			return Args{}, fmt.Errorf("config: %v", err)
 		}
 		baseCfg = *loaded
-	} else {
-		baseCfg = config.DefaultConfig()
 	}
 
-	// Main flag set with defaults from YAML or stock defaults
-	fs := flag.NewFlagSet("sandbox", flag.ContinueOnError)
-	fs.SetOutput(io.Discard)
-
-	verbose := fs.Bool("verbose", false, "Enable microsecond diagnostic trace tracking records")
-	networkModeStr := fs.String("network-mode", string(baseCfg.NetworkMode), "Network namespace isolation mode")
-	bridgeSubnet := fs.String("bridge-subnet", baseCfg.BridgeConfig.Subnet, "Bridge network subnet CIDR")
-	bridgeGateway := fs.String("bridge-gateway", baseCfg.BridgeConfig.GatewayIP, "Bridge gateway IP address")
-	bridgeContainerIP := fs.String("bridge-container-ip", baseCfg.BridgeConfig.ContainerIP, "Container bridge interface IP address")
-	envWhitelistStr := fs.String("env-whitelist", strings.Join(baseCfg.EnvWhitelist, ","), "Comma-separated keys of allowed host environment variables")
-	initialStorage := fs.Int("storage-initial", baseCfg.Storage.InitialLimitMB, "Initial file storage limit boundary in Megabytes")
-	maxStorage := fs.Int("storage-max", baseCfg.Storage.AbsoluteMaximumMB, "Absolute hard stop file storage capacity limit in Megabytes")
-	storagePolicy := fs.String("storage-policy", baseCfg.Storage.ExpansionPolicy, "Threshold breach mitigation rule policy behavior")
-	storageStep := fs.Int("storage-step", baseCfg.Storage.IncrementStepMB, "Capacity allocation block added upon limit violation triggers")
-
-	// Use cleanArgv here instead of original unstripped argv
-	if err := fs.Parse(cleanArgv); err != nil {
+	// Pass two uses YAML values as defaults and applies only flags explicitly
+	// supplied by the caller. This preserves values that were not overridden.
+	parsed, err := parseCLI(argv, baseCfg)
+	if err != nil {
 		return Args{}, err
 	}
-
-	// Start from base config and overlay CLI-provided values
+	values := parsed.values
 	cfg := baseCfg
 
-	// Network mode override
-	if *networkModeStr != string(baseCfg.NetworkMode) {
-		netMode := network.NetworkMode(*networkModeStr)
-		if !netMode.IsValid() {
-			return Args{}, fmt.Errorf("value_error: %q is not a valid NetworkMode", *networkModeStr)
-		}
-		cfg.NetworkMode = netMode
-	}
-
-	// Bridge config overrides
-	if *bridgeSubnet != network.DefaultBridgeConfig().Subnet {
-		cfg.BridgeConfig.Subnet = *bridgeSubnet
-	}
-	if *bridgeGateway != network.DefaultBridgeConfig().GatewayIP {
-		cfg.BridgeConfig.GatewayIP = *bridgeGateway
-	}
-	if *bridgeContainerIP != network.DefaultBridgeConfig().ContainerIP {
-		cfg.BridgeConfig.ContainerIP = *bridgeContainerIP
-	}
-
-	// Environment whitelist override
-	if *envWhitelistStr != "" {
-		parts := strings.Split(*envWhitelistStr, ",")
-		var whitelist []string
-		for _, part := range parts {
-			trimmed := strings.TrimSpace(part)
-			if trimmed != "" {
-				whitelist = append(whitelist, trimmed)
-			}
-		}
-		if len(whitelist) > 0 {
-			cfg.EnvWhitelist = whitelist
+	if parsed.seen["network-mode"] {
+		cfg.NetworkMode = network.NetworkMode(*values.networkMode)
+		if !cfg.NetworkMode.IsValid() {
+			return Args{}, fmt.Errorf("value_error: invalid network mode %q", cfg.NetworkMode)
 		}
 	}
+	if parsed.seen["bridge-subnet"] {
+		cfg.BridgeConfig.Subnet = *values.bridgeSubnet
+	}
+	if parsed.seen["bridge-gateway"] {
+		cfg.BridgeConfig.GatewayIP = *values.bridgeGateway
+	}
+	if parsed.seen["bridge-container-ip"] {
+		cfg.BridgeConfig.ContainerIP = *values.bridgeContainer
+	}
+	if parsed.seen["env-whitelist"] {
+		cfg.EnvWhitelist = splitCSV(*values.envWhitelist)
+	}
+	if parsed.seen["storage-initial"] {
+		cfg.Storage.InitialLimitMB = *values.initialStorage
+	}
+	if parsed.seen["storage-max"] {
+		cfg.Storage.AbsoluteMaximumMB = *values.maximumStorage
+	}
+	if parsed.seen["storage-policy"] {
+		cfg.Storage.ExpansionPolicy = strings.ToLower(*values.storagePolicy)
+	}
+	if parsed.seen["storage-step"] {
+		cfg.Storage.IncrementStepMB = *values.storageStep
+	}
 
-	// Storage overrides
-	if *initialStorage != config.DefaultConfig().Storage.InitialLimitMB {
-		cfg.Storage.InitialLimitMB = *initialStorage
-	}
-	if *maxStorage != config.DefaultConfig().Storage.AbsoluteMaximumMB {
-		cfg.Storage.AbsoluteMaximumMB = *maxStorage
-	}
-	if *storagePolicy != config.DefaultConfig().Storage.ExpansionPolicy {
-		cfg.Storage.ExpansionPolicy = strings.ToLower(*storagePolicy)
-	}
-	if *storageStep != config.DefaultConfig().Storage.IncrementStepMB {
-		cfg.Storage.IncrementStepMB = *storageStep
-	}
-
-	// Positional args override command
-	command := fs.Args()
-	if len(command) > 0 {
-		for _, arg := range command {
+	if len(parsed.args) > 0 {
+		if cfg.BinaryPath != "" || len(cfg.Args) > 0 || len(cfg.Command) > 0 {
+			return Args{}, errors.New("value_error: command forms are mutually exclusive")
+		}
+		for _, arg := range parsed.args {
 			if strings.TrimSpace(arg) == "" {
 				return Args{}, errors.New("value_error: command argument is empty or only whitespace")
 			}
 		}
-		cfg.Command = command
+		cfg.Command = append([]string(nil), parsed.args...)
 	}
 
-	// Validate merged result
 	if err := cfg.Validate(); err != nil {
 		return Args{}, err
 	}
+	return Args{Config: cfg, Verbose: *values.verbose}, nil
+}
 
-	return Args{
-		Config:  cfg,
-		Verbose: *verbose,
-	}, nil
+func splitCSV(value string) []string {
+	var result []string
+	for _, part := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
 }

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -152,5 +154,102 @@ func TestMain_CLIParityMatrix(t *testing.T) {
 				t.Errorf("ParseArgs() output discrepancy:\ngot  = %+v\nwant = %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseArgs_PreservesConfigValuesWithoutCLIOverrides(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "sandbox.yaml")
+	contents := []byte(`
+binary_path: /bin/echo
+args: [from-config]
+network_mode: host
+bridge:
+  bridge_name: cfg0
+  subnet: 172.20.0.0/24
+  gateway_ip: 172.20.0.1
+  container_ip: 172.20.0.2
+  host_veth_name: cfg-veth-h
+  ns_veth_name: cfg-veth-c
+  container_iface: eth0
+storage:
+  initial_limit_mb: 20
+  absolute_maximum_mb: 40
+  expansion_policy: none
+  increment_step_mb: 0
+`)
+	if err := os.WriteFile(configPath, contents, 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	got, err := ParseArgs([]string{"--config", configPath})
+	if err != nil {
+		t.Fatalf("ParseArgs() error = %v", err)
+	}
+
+	if got.Config.BinaryPath != "/bin/echo" || !reflect.DeepEqual(got.Config.Args, []string{"from-config"}) {
+		t.Fatalf("config command was overwritten: %+v", got.Config)
+	}
+	if got.Config.NetworkMode != network.Host {
+		t.Fatalf("NetworkMode = %q, want %q", got.Config.NetworkMode, network.Host)
+	}
+	if got.Config.BridgeConfig.BridgeName != "cfg0" {
+		t.Fatalf("BridgeName = %q, want cfg0", got.Config.BridgeConfig.BridgeName)
+	}
+	if got.Config.Storage.InitialLimitMB != 20 || got.Config.Storage.AbsoluteMaximumMB != 40 {
+		t.Fatalf("Storage = %+v, want config values", got.Config.Storage)
+	}
+}
+
+func TestParseArgs_RejectsConflictingCommandForms(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "sandbox.yaml")
+	if err := os.WriteFile(configPath, []byte("binary_path: /bin/echo\nargs: [from-config]\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := ParseArgs([]string{"--config", configPath, "printf", "hello"}); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("ParseArgs() error = %v, want conflicting command forms", err)
+	}
+}
+
+func TestParseArgs_DiscoversConfigAfterOtherFlags(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "sandbox.yaml")
+	if err := os.WriteFile(configPath, []byte("binary_path: /bin/echo\nargs: [from-config]\nnetwork_mode: host\n"), 0600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	got, err := ParseArgs([]string{"--verbose", "--config", configPath})
+	if err != nil {
+		t.Fatalf("ParseArgs() error = %v", err)
+	}
+	if !got.Verbose || got.Config.NetworkMode != network.Host || got.Config.Args[0] != "from-config" {
+		t.Fatalf("config or explicit flag was lost: %+v", got)
+	}
+}
+
+func TestParseArgs_RejectsDuplicateOptions(t *testing.T) {
+	if _, err := ParseArgs([]string{"--verbose", "--verbose", "true"}); err == nil || !strings.Contains(err.Error(), "more than once") {
+		t.Fatalf("ParseArgs() error = %v, want duplicate-option error", err)
+	}
+}
+
+func TestSplitInternalInvocationRequiresLeadingMarker(t *testing.T) {
+	if internal, _, err := splitInternalInvocation([]string{"echo", "--internal-child"}); err == nil || internal {
+		t.Fatalf("splitInternalInvocation() = internal=%v, err=%v", internal, err)
+	}
+	if internal, args, err := splitInternalInvocation([]string{"--internal-child", "echo"}); err != nil || !internal || !reflect.DeepEqual(args, []string{"echo"}) {
+		t.Fatalf("splitInternalInvocation() = %v, %v, %v", internal, args, err)
+	}
+}
+
+func TestWithEnvironment_ReplacesExistingValue(t *testing.T) {
+	environment := withEnvironment([]string{"PATH=/bin", "GODEBUG=other", "GODEBUG=duplicate"}, "GODEBUG", "pidfd=0")
+
+	var matches []string
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, "GODEBUG=") {
+			matches = append(matches, entry)
+		}
+	}
+	if !reflect.DeepEqual(matches, []string{"GODEBUG=pidfd=0"}) {
+		t.Fatalf("GODEBUG entries = %v, want one replacement", matches)
 	}
 }

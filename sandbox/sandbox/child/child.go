@@ -5,6 +5,7 @@ package child
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"syscall"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"sandbox/sandbox/config"
 	"sandbox/sandbox/fs"
 	"sandbox/sandbox/network"
+	"sandbox/sandbox/resources"
 	"sandbox/sandbox/security"
 
 	"golang.org/x/sys/unix"
@@ -58,59 +60,50 @@ func childLog(msg string) {
 	_, _ = syscall.Write(1, []byte(fmt.Sprintf("[CHILD DEBUG] %s\n", msg)))
 }
 
-func Child(cfg config.Config, p2cRFd uintptr, c2pWFd uintptr, hostUID int, hostGID int) int {
-    
-    os.Setenv("GODEBUG", "pidfd=0")
-    os.Setenv("GOEXPERIMENT", "none")
+func Child(cfg config.Config, p2cRFd, c2pWFd int) int {
 	childLog("Child process entered execution layer.")
 
-	// 1. NETWORK HANDSHAKE
-	if cfg.NetworkMode == network.Bridge && p2cRFd != 0 && c2pWFd != 0 {
-		childLog("Signalling readiness to parent...")
-		if _, err := syscall.Write(int(c2pWFd), []byte{common.ReadyByte}); err != nil {
-			childLog(fmt.Sprintf("Failed to signal READY: %v", err))
-			return 1
-		}
-		
-		ack := make([]byte, 1)
-		if _, err := syscall.Read(int(p2cRFd), ack); err != nil {
-			childLog(fmt.Sprintf("Failed to read ACK: %v", err))
-			return 1
-		}
-		if ack[0] != common.AckByte {
-			childLog("Invalid ACK received.")
-			return 1
-		}
-		childLog("ACK received, proceeding.")
+	if err := waitForParentSetup(p2cRFd, c2pWFd); err != nil {
+		childLog(fmt.Sprintf("PARENT HANDSHAKE FAILURE: %v", err))
+		return 1
 	}
 
-	// 2. CLEANUP: Close inherited host file descriptors
-	for fd := 3; fd < 1024; fd++ {
-		if uintptr(fd) == p2cRFd || uintptr(fd) == c2pWFd {
-			continue
+	if err := resources.ApplyInitialStorageLimit(cfg.Storage); err != nil {
+		childLog(fmt.Sprintf("RESOURCE FAILURE: %v", err))
+		return 1
+	}
+	if cfg.MemoryLimitGB > 0 {
+		memoryBytes := uint64(cfg.MemoryLimitGB) * gbToBytes
+		rlim := syscall.Rlimit{Cur: memoryBytes, Max: memoryBytes}
+		if err := syscall.Setrlimit(unix.RLIMIT_AS, &rlim); err != nil {
+			childLog(fmt.Sprintf("RESOURCE FAILURE: memory limit: %v", err))
+			return 1
 		}
+	}
+
+	// CLEANUP: Close all inherited host file descriptors after synchronization.
+	for fd := 3; fd < 1024; fd++ {
 		_ = syscall.Close(fd)
 	}
 
-	// 3. NETWORK CONFIGURATION
+	// Configure the moved interface only after the parent has acknowledged setup.
 	if cfg.NetworkMode == network.Bridge {
 		if err := network.ConfigureChildIface(cfg.BridgeConfig); err != nil {
 			childLog(fmt.Sprintf("Bridge config failed: %v", err))
 			return 1
 		}
 		childLog("Bridge interface configured.")
-		
+
 		// 2. STABILIZATION: Force Go runtime to yield and re-examine the network state
 		// This prevents the netpoll panic when the namespace moves.
 		time.Sleep(100 * time.Millisecond)
 	}
 
 	// ... (Rest of your function: CAPABILITIES, JAIL, SECCOMP, EXEC)
-	
-	for _, capName := range cfg.DropCapabilities {
-		if capVal, ok := capabilityNameToValue[capName]; ok {
-			_ = unix.Prctl(unix.PR_CAPBSET_DROP, capVal, 0, 0, 0)
-		}
+
+	if err := dropCapabilities(cfg.DropCapabilities); err != nil {
+		childLog(fmt.Sprintf("SECURITY FAILURE: %v", err))
+		return 1
 	}
 
 	rootfsTarget := cfg.RootFSSource
@@ -122,31 +115,88 @@ func Child(cfg config.Config, p2cRFd uintptr, c2pWFd uintptr, hostUID int, hostG
 		return 1
 	}
 
-	if cfg.ReadOnlyRoot {
-		_ = syscall.Mount("", "/", "", syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_BIND, "")
-	}
-
 	if len(cfg.DNSServers) > 0 {
 		var lines []string
 		for _, dns := range cfg.DNSServers {
 			lines = append(lines, "nameserver "+dns)
 		}
-		_ = fs.WriteText("/etc/resolv.conf", strings.Join(lines, "\n")+"\n")
+		if err := fs.WriteText("/etc/resolv.conf", strings.Join(lines, "\n")+"\n"); err != nil {
+			childLog(fmt.Sprintf("NETWORK FAILURE: DNS configuration: %v", err))
+			return 1
+		}
+	}
+
+	if cfg.ReadOnlyRoot {
+		if err := syscall.Mount("", "/", "", syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_BIND, ""); err != nil {
+			childLog(fmt.Sprintf("JAIL FAILURE: read-only root: %v", err))
+			return 1
+		}
 	}
 
 	rlim := syscall.Rlimit{Cur: uint64(cfg.MaxProcesses), Max: uint64(cfg.MaxProcesses)}
-	_ = syscall.Setrlimit(unix.RLIMIT_NPROC, &rlim)
+	if cfg.MaxProcesses > 0 {
+		if err := syscall.Setrlimit(unix.RLIMIT_NPROC, &rlim); err != nil {
+			childLog(fmt.Sprintf("RESOURCE FAILURE: process limit: %v", err))
+			return 1
+		}
+	}
+
+	if cfg.WorkingDir != "" {
+		if err := syscall.Chdir(cfg.WorkingDir); err != nil {
+			childLog(fmt.Sprintf("JAIL FAILURE: working directory: %v", err))
+			return 1
+		}
+	}
 
 	if err := security.ApplySeccompFiltersCustom(cfg.SeccompDefaultAction, cfg.BlockedSyscalls); err != nil {
 		childLog(fmt.Sprintf("SECCOMP FAILURE: %v", err))
 		return 1
 	}
 
-	binaryPath := cfg.BinaryPath
-	execArgs := append([]string{binaryPath}, cfg.Args...)
-	
+	execArgs := cfg.CommandLine()
+	if len(execArgs) == 0 {
+		childLog("EXEC FAILED: no command configured")
+		return 1
+	}
+
+	binaryPath, err := exec.LookPath(execArgs[0])
+	if err != nil {
+		childLog(fmt.Sprintf("EXEC FAILED: %v", err))
+		return 1
+	}
+
 	childLog(fmt.Sprintf("Handing off to %q", binaryPath))
-	err := unix.Exec(binaryPath, execArgs, cfg.EnvVars)
+	err = unix.Exec(binaryPath, execArgs, cfg.Environment(os.Environ()))
 	childLog(fmt.Sprintf("EXEC FAILED: %v", err))
 	return 1
+}
+
+func waitForParentSetup(readFD, writeFD int) error {
+	if readFD <= 0 || writeFD <= 0 {
+		return fmt.Errorf("invalid fixed handshake descriptors")
+	}
+	if _, err := unix.Write(writeFD, []byte{common.ReadyByte}); err != nil {
+		return fmt.Errorf("send READY: %v", err)
+	}
+	ack := make([]byte, 1)
+	if _, err := unix.Read(readFD, ack); err != nil {
+		return fmt.Errorf("read ACK: %v", err)
+	}
+	if ack[0] != common.AckByte {
+		return fmt.Errorf("invalid ACK byte %q", ack[0])
+	}
+	return nil
+}
+
+func dropCapabilities(capabilities []string) error {
+	for _, name := range capabilities {
+		capability, ok := capabilityNameToValue[name]
+		if !ok {
+			return fmt.Errorf("unknown capability %q", name)
+		}
+		if err := unix.Prctl(unix.PR_CAPBSET_DROP, capability, 0, 0, 0); err != nil {
+			return fmt.Errorf("drop capability %q: %v", name, err)
+		}
+	}
+	return nil
 }

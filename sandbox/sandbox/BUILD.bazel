@@ -106,6 +106,7 @@ go_binary(
         ":network",
         ":parent",
         ":utils",
+        "@org_golang_x_sys//unix:go_default_library",
     ],
 )
 
@@ -120,6 +121,7 @@ go_test(
         ":network",
         ":parent",
         ":utils",
+        "@org_golang_x_sys//unix:go_default_library",
     ],
 )
 
@@ -157,4 +159,15 @@ go_test(
     name = "utils_test",
     srcs = glob(["utils/*.go"]),
     importpath = "sandbox/sandbox/utils",
+)
+
+go_test(
+    name = "parent_test",
+    srcs = glob(["parent/*.go"]),
+    importpath = "sandbox/sandbox/parent",
+    deps = [
+        ":common",
+        ":config",
+        ":network",
+    ],
 )
