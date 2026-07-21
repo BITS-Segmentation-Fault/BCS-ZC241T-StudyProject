@@ -15,16 +15,21 @@ const mbToBytes = 1024 * 1024
 
 // Bind the starting capacity ceiling to the child process.
 func ApplyInitialStorageLimit(cfg config.StorageConfig) error {
+	if cfg.InitialLimitMB <= 0 {
+		return fmt.Errorf("initial storage limit must be positive")
+	}
+	if uint64(cfg.InitialLimitMB) > ^uint64(0)/mbToBytes {
+		return fmt.Errorf("initial storage limit overflows the kernel limit")
+	}
 	initialBytes := uint64(cfg.InitialLimitMB) * mbToBytes
-	maxBytes := uint64(cfg.AbsoluteMaximumMB) * mbToBytes
 
 	rLimit := syscall.Rlimit{
-		Cur: initialBytes, // Current limit: Triggers SIGXFSZ if breached
-		Max: maxBytes,     // Absolute kernel limit ceiling
+		Cur: initialBytes,
+		Max: initialBytes,
 	}
 
 	if err := syscall.Setrlimit(syscall.RLIMIT_FSIZE, &rLimit); err != nil {
-		return fmt.Errorf("Kernel rejected storage resource limits initialization: %v", err)
+		return fmt.Errorf("kernel rejected initial file-size limit: %v", err)
 	}
 	return nil
 }

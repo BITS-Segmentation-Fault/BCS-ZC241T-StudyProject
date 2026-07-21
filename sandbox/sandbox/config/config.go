@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
+	"path/filepath"
 	"strings"
 
 	"sandbox/sandbox/network"
@@ -124,7 +126,7 @@ func DefaultConfig() Config {
 		ReadOnlyRoot:         true,
 		SeccompDefaultAction: ActionKill,
 		BlockedSyscalls:      []string{"mount", "reboot", "ptrace", "swapon", "syslog"},
-		DropCapabilities:     []string{"CAP_SYS_ADMIN", "CAP_NET_ADMIN", "CAP_SYS_PTRACE", "CAP_SYS_MODULE", "CAP_SYS_RAWIO", "CAP_SYS_BOOT"},
+		DropCapabilities:     []string{"ALL"},
 		Storage: StorageConfig{
 			InitialLimitMB:    100,
 			AbsoluteMaximumMB: 500,
@@ -157,6 +159,12 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.BinaryPath != "" && len(c.Command) > 0 {
+		return errors.New("value_error: binary_path/args and command are mutually exclusive")
+	}
+	if len(c.Args) > 0 && c.BinaryPath == "" {
+		return errors.New("value_error: args requires binary_path")
+	}
 	if c.BinaryPath != "" {
 		if strings.TrimSpace(c.BinaryPath) == "" {
 			return errors.New("value_error: binary_path cannot be only whitespace")
@@ -166,14 +174,14 @@ func (c *Config) Validate() error {
 	}
 
 	for _, arg := range c.Args {
-		if strings.TrimSpace(arg) == "" {
+		if strings.TrimSpace(arg) == "" || strings.IndexByte(arg, 0) >= 0 {
 			return errors.New("value_error: args element is empty or only whitespace")
 		}
 	}
 
 	if len(c.Command) > 0 {
 		for _, arg := range c.Command {
-			if strings.TrimSpace(arg) == "" {
+			if strings.TrimSpace(arg) == "" || strings.IndexByte(arg, 0) >= 0 {
 				return errors.New("value_error: command element is empty or only whitespace")
 			}
 		}
@@ -193,6 +201,9 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(cap) == "" {
 			return errors.New("value_error: drop_capabilities contains empty entry")
 		}
+		if !IsKnownCapability(cap) {
+			return fmt.Errorf("value_error: unknown capability %q", cap)
+		}
 	}
 
 	s := c.Storage
@@ -204,12 +215,11 @@ func (c *Config) Validate() error {
 	}
 
 	policy := strings.ToLower(s.ExpansionPolicy)
-	if policy != "none" && policy != "automatic" && policy != "manual" {
-		return errors.New("value_error: expansion_policy must be 'none', 'automatic', or 'manual'")
+	if policy != "none" {
+		return errors.New("value_error: storage expansion policies are not supported; expansion_policy must be 'none'")
 	}
-
-	if (policy == "automatic" || policy == "manual") && s.IncrementStepMB <= 0 {
-		return errors.New("value_error: increment_step_mb must be > 0 when expansion is enabled")
+	if s.IncrementStepMB < 0 {
+		return errors.New("value_error: increment_step_mb cannot be negative")
 	}
 
 	if c.CPULimitPercent < 0 || c.CPULimitPercent > 100 {
@@ -227,6 +237,12 @@ func (c *Config) Validate() error {
 	if c.RootFSSource != "" && strings.TrimSpace(c.RootFSSource) == "" {
 		return errors.New("value_error: rootfs_source cannot be only whitespace")
 	}
+	if c.RootFSSource != "" && (!filepath.IsAbs(c.RootFSSource) || pathHasParentEscape(c.RootFSSource)) {
+		return errors.New("value_error: rootfs_source must be absolute and cannot contain ..")
+	}
+	if c.WorkingDir != "" && (!filepath.IsAbs(c.WorkingDir) || pathHasParentEscape(c.WorkingDir)) {
+		return errors.New("value_error: working_dir must be absolute and cannot contain ..")
+	}
 
 	for _, bm := range c.BindMounts {
 		if strings.TrimSpace(bm.HostPath) == "" {
@@ -235,13 +251,60 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(bm.ContainerPath) == "" {
 			return errors.New("value_error: bind_mount container_path cannot be empty")
 		}
+		if !filepath.IsAbs(bm.HostPath) || !filepath.IsAbs(bm.ContainerPath) {
+			return errors.New("value_error: bind_mount paths must be absolute")
+		}
+		if pathHasParentEscape(bm.ContainerPath) {
+			return fmt.Errorf("value_error: bind_mount container_path %q escapes rootfs", bm.ContainerPath)
+		}
 	}
 
 	for _, dns := range c.DNSServers {
-		if strings.TrimSpace(dns) == "" {
-			return errors.New("value_error: dns_servers contains empty entry")
+		if strings.TrimSpace(dns) == "" || net.ParseIP(dns) == nil {
+			return fmt.Errorf("value_error: dns_servers contains invalid address %q", dns)
+		}
+	}
+	for _, entry := range c.EnvVars {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || key == "" || strings.IndexByte(entry, 0) >= 0 {
+			return fmt.Errorf("value_error: env_vars entry %q must be KEY=VALUE without NUL", entry)
+		}
+	}
+	for _, key := range c.EnvWhitelist {
+		if key == "" || strings.ContainsAny(key, "=\x00") {
+			return fmt.Errorf("value_error: env_whitelist key %q is invalid", key)
 		}
 	}
 
 	return nil
+}
+
+var knownCapabilities = map[string]struct{}{
+	"CAP_CHOWN": {}, "CAP_DAC_OVERRIDE": {}, "CAP_DAC_READ_SEARCH": {}, "CAP_FOWNER": {},
+	"CAP_FSETID": {}, "CAP_KILL": {}, "CAP_SETGID": {}, "CAP_SETUID": {}, "CAP_SETPCAP": {},
+	"CAP_LINUX_IMMUTABLE": {}, "CAP_NET_BIND_SERVICE": {}, "CAP_NET_BROADCAST": {}, "CAP_NET_ADMIN": {},
+	"CAP_NET_RAW": {}, "CAP_IPC_LOCK": {}, "CAP_IPC_OWNER": {}, "CAP_SYS_MODULE": {}, "CAP_SYS_RAWIO": {},
+	"CAP_SYS_CHROOT": {}, "CAP_SYS_PTRACE": {}, "CAP_SYS_PACCT": {}, "CAP_SYS_ADMIN": {}, "CAP_SYS_BOOT": {},
+	"CAP_SYS_NICE": {}, "CAP_SYS_RESOURCE": {}, "CAP_SYS_TIME": {}, "CAP_SYS_TTY_CONFIG": {}, "CAP_MKNOD": {},
+	"CAP_LEASE": {}, "CAP_AUDIT_WRITE": {}, "CAP_AUDIT_CONTROL": {}, "CAP_SETFCAP": {}, "CAP_MAC_OVERRIDE": {},
+	"CAP_MAC_ADMIN": {}, "CAP_SYSLOG": {}, "CAP_WAKE_ALARM": {}, "CAP_BLOCK_SUSPEND": {}, "CAP_AUDIT_READ": {},
+	"CAP_PERFMON": {}, "CAP_BPF": {}, "CAP_CHECKPOINT_RESTORE": {},
+}
+
+func IsKnownCapability(name string) bool {
+	name = strings.ToUpper(strings.TrimSpace(name))
+	if name == "ALL" {
+		return true
+	}
+	_, ok := knownCapabilities[name]
+	return ok
+}
+
+func pathHasParentEscape(path string) bool {
+	for _, part := range strings.Split(path, string(filepath.Separator)) {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }

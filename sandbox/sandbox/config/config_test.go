@@ -17,7 +17,7 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Valid: minimal binary_path",
 			inputConfig: Config{
-				BinaryPath:          "/bin/echo",
+				BinaryPath:           "/bin/echo",
 				SeccompDefaultAction: ActionKill,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
@@ -32,7 +32,7 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Valid: command fallback",
 			inputConfig: Config{
-				Command:             []string{"echo", "hello"},
+				Command:              []string{"echo", "hello"},
 				SeccompDefaultAction: ActionKill,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
@@ -47,34 +47,34 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Valid: full featured config",
 			inputConfig: Config{
-				BinaryPath:          "/usr/bin/python",
-				Args:                []string{"-m", "http.server"},
-				EnvVars:             []string{"PATH=/bin", "TERM=xterm"},
-				ReadOnlyRoot:        true,
+				BinaryPath:           "/usr/bin/python",
+				Args:                 []string{"-m", "http.server"},
+				EnvVars:              []string{"PATH=/bin", "TERM=xterm"},
+				ReadOnlyRoot:         true,
 				SeccompDefaultAction: ActionTrap,
-				BlockedSyscalls:     []string{"mount", "reboot"},
-				DropCapabilities:    []string{"CAP_SYS_ADMIN", "CAP_NET_ADMIN"},
+				BlockedSyscalls:      []string{"mount", "reboot"},
+				DropCapabilities:     []string{"CAP_SYS_ADMIN", "CAP_NET_ADMIN"},
 				Storage: StorageConfig{
 					InitialLimitMB:    200,
 					AbsoluteMaximumMB: 1000,
-					ExpansionPolicy:   "automatic",
-					IncrementStepMB:   50,
+					ExpansionPolicy:   "none",
+					IncrementStepMB:   0,
 				},
-				CPULimitPercent:  50,
-				MemoryLimitGB:    2,
-				MaxProcesses:     50,
-				NetworkMode:      network.None,
-				WorkingDir:       "/app",
-				RootFSSource:     "/custom/rootfs",
-				BindMounts:       []BindMount{{HostPath: "/data", ContainerPath: "/mnt/data", ReadOnly: true}},
-				DNSServers:       []string{"8.8.8.8", "1.1.1.1"},
+				CPULimitPercent: 50,
+				MemoryLimitGB:   2,
+				MaxProcesses:    50,
+				NetworkMode:     network.None,
+				WorkingDir:      "/app",
+				RootFSSource:    "/custom/rootfs",
+				BindMounts:      []BindMount{{HostPath: "/data", ContainerPath: "/mnt/data", ReadOnly: true}},
+				DNSServers:      []string{"8.8.8.8", "1.1.1.1"},
 			},
 			wantErr: false,
 		},
 		{
 			name: "Valid: seccomp action allow",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionAllow,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
@@ -89,7 +89,7 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Valid: seccomp action log",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionLog,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
@@ -104,7 +104,7 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Valid: bridge mode with valid config",
 			inputConfig: Config{
-				BinaryPath:          "/bin/echo",
+				BinaryPath:           "/bin/echo",
 				SeccompDefaultAction: ActionKill,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
@@ -120,7 +120,7 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: bridge mode with empty bridge name",
 			inputConfig: Config{
-				BinaryPath:          "/bin/echo",
+				BinaryPath:           "/bin/echo",
 				SeccompDefaultAction: ActionKill,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
@@ -156,7 +156,7 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: invalid seccomp action",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: SeccompAction("bogus"),
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
@@ -172,7 +172,7 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: invalid network mode",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
@@ -188,7 +188,7 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: empty command element",
 			inputConfig: Config{
-				Command:             []string{"ls", ""},
+				Command:              []string{"ls", ""},
 				SeccompDefaultAction: ActionKill,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
@@ -204,9 +204,9 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: blocked_syscalls with empty entry",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
-				BlockedSyscalls:     []string{"mount", ""},
+				BlockedSyscalls:      []string{"mount", ""},
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
 					AbsoluteMaximumMB: 500,
@@ -221,9 +221,9 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: drop_capabilities with empty entry",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
-				DropCapabilities:    []string{"CAP_SYS_ADMIN", ""},
+				DropCapabilities:     []string{"CAP_SYS_ADMIN", ""},
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
 					AbsoluteMaximumMB: 500,
@@ -238,9 +238,9 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: cpu_limit_percent out of range (negative)",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
-				CPULimitPercent:     -1,
+				CPULimitPercent:      -1,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
 					AbsoluteMaximumMB: 500,
@@ -255,9 +255,9 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: cpu_limit_percent out of range (above 100)",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
-				CPULimitPercent:     101,
+				CPULimitPercent:      101,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
 					AbsoluteMaximumMB: 500,
@@ -272,9 +272,9 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: memory_limit_gb negative",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
-				MemoryLimitGB:       -1,
+				MemoryLimitGB:        -1,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
 					AbsoluteMaximumMB: 500,
@@ -289,9 +289,9 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: max_processes negative",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
-				MaxProcesses:        -1,
+				MaxProcesses:         -1,
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
 					AbsoluteMaximumMB: 500,
@@ -306,9 +306,9 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: empty bind_mount host_path",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
-				BindMounts:          []BindMount{{HostPath: "", ContainerPath: "/mnt"}},
+				BindMounts:           []BindMount{{HostPath: "", ContainerPath: "/mnt"}},
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
 					AbsoluteMaximumMB: 500,
@@ -323,9 +323,9 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: empty bind_mount container_path",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
-				BindMounts:          []BindMount{{HostPath: "/data", ContainerPath: ""}},
+				BindMounts:           []BindMount{{HostPath: "/data", ContainerPath: ""}},
 				Storage: StorageConfig{
 					InitialLimitMB:    100,
 					AbsoluteMaximumMB: 500,
@@ -340,7 +340,7 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 		{
 			name: "Error: storage initial > absolute",
 			inputConfig: Config{
-				BinaryPath:          "/bin/ls",
+				BinaryPath:           "/bin/ls",
 				SeccompDefaultAction: ActionKill,
 				Storage: StorageConfig{
 					InitialLimitMB:    500,
@@ -352,6 +352,20 @@ func TestConfig_ValidationAndParity(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: "cannot cross absolute maximum boundary",
+		},
+		{
+			name: "Error: working directory escapes rootfs",
+			inputConfig: Config{
+				BinaryPath:           "/bin/ls",
+				SeccompDefaultAction: ActionKill,
+				WorkingDir:           "/work/../host",
+				Storage: StorageConfig{
+					InitialLimitMB: 100, AbsoluteMaximumMB: 500, ExpansionPolicy: "none",
+				},
+				NetworkMode: network.Host,
+			},
+			wantErr:     true,
+			errContains: "working_dir must be absolute",
 		},
 	}
 

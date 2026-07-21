@@ -15,11 +15,16 @@ import (
 	"sandbox/sandbox/common"
 	"sandbox/sandbox/config"
 	"sandbox/sandbox/network"
+	"sandbox/sandbox/resources"
 )
 
 const childReadyTimeout = 10 * time.Second
 
 func Parent(cfg config.Config, publicArgs []string) int {
+	if err := resources.CheckCPUSupport(cfg.CPULimitPercent); err != nil {
+		log.Printf("[PRE-FLIGHT ERROR] CPU limit cannot be provisioned: %v", err)
+		return 1
+	}
 	var bridgeState *network.BridgeState
 	if cfg.NetworkMode == network.Bridge {
 		var err error
@@ -85,6 +90,15 @@ func Parent(cfg config.Config, publicArgs []string) int {
 		return 1
 	}
 
+	cpuCleanup, err := resources.ApplyCPULimit(cmd.Process.Pid, cfg.CPULimitPercent)
+	if err != nil {
+		terminateChild(cmd)
+		closeFiles(p2cW, c2pR)
+		cleanupBridge(bridgeState, cfg)
+		log.Printf("[RESOURCE] CPU cgroup setup failed: %v", err)
+		return 1
+	}
+
 	if cfg.NetworkMode == network.Bridge {
 		if err := network.MoveVethToChild(cmd.Process.Pid, cfg.BridgeConfig); err != nil {
 			terminateChild(cmd)
@@ -103,7 +117,7 @@ func Parent(cfg config.Config, publicArgs []string) int {
 		return 1
 	}
 	closeFiles(p2cW, c2pR)
-	return waitForChild(cmd, bridgeState, cfg)
+	return waitForChild(cmd, bridgeState, cfg, cpuCleanup)
 }
 
 func waitForReady(file *os.File) error {
@@ -121,8 +135,11 @@ func waitForReady(file *os.File) error {
 	return nil
 }
 
-func waitForChild(cmd *exec.Cmd, state *network.BridgeState, cfg config.Config) int {
+func waitForChild(cmd *exec.Cmd, state *network.BridgeState, cfg config.Config, cpuCleanup func()) int {
 	defer cleanupBridge(state, cfg)
+	if cpuCleanup != nil {
+		defer cpuCleanup()
+	}
 
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
