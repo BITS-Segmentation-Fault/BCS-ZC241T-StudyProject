@@ -1,0 +1,90 @@
+Background of the Problem
+
+Traditional Desktop Security Model: On traditional Linux desktops, the applications run within a single user context and inherit the full privileges of the executing user account. When a user executes a program, that application gets read and modify access to all user files, personal data, and system resources accessible by that account. Mobile operating systems enforce strict app isolation by default, running each application in a constrained sandbox with an explicit permission model. On the contrary, traditional Linux desktops have lacked a widespread, default security architecture that offers equivalent application confinement. 
+
+
+Gap in Existing Systems
+
+Solutions like Docker, Podman, and LXC rely on robust Linux kernel isolation mechanisms, but they target DevOps, server environments, and isolated development environments, making them impractical for everyday desktop workflows and casual users. 
+Existing desktop distribution/sandboxing tools (like Flatpak and Snap) often fail to enforce strict isolation. Flatpak applications frequently override sandbox restrictions or request broad permissions (e.g., full home directory access), creating security vulnerabilities. Snap relies heavily on AppArmor, which limits its sandboxing functionality on non-AppArmor Linux distributions (such as Fedora, which uses SELinux).
+Lightweight sandboxing utilities like Bubblewrap are powerful but too low-level for everyday desktop users, requiring manual setup of system mounts and directory bindings. Conversely, tools like Firejail rely on large setuid-root binaries, increasing the system's attack surface.
+Existing tools are tied to specific app stores or package formats. There is no widely adopted, distribution-agnostic tool that allows regular users to sandbox existing binaries on demand using a simple, permission-based interface without needing superuser privileges.  
+
+Importance of the Problem
+
+Mitigating Malware & Supply-Chain Attacks: As Linux desktop usage grows beyond core software developers, threats from third-party malware, compromised packages, and supply-chain exploits are increasing. Sandboxing limits the blast radius of an exploit by, for example, preventing a compromised web browser or application from accessing sensitive personal files or executing ransomware.  
+Privacy & User Authority: Bringing an Android-like permission model to Linux gives users direct control over resource allocation (e.g., network access, file access, camera/microphone permissions) rather than forcing them to blindly trust every installed application.  
+Rootless & Distribution-Agnostic Security: Utilizing Linux kernel user namespaces allows sandboxing without granting elevated root privileges to background daemons or setuid binaries. This provides a safe, system-independent mechanism to improve security across various Linux environments.
+
+Primary Objectives
+
+Implement a Secure, Rootless Sandboxing Runtime: Develop a core sandbox engine that isolates target command-line applications using Linux kernel primitives—specifically user namespaces , network namespaces, mount namespaces, and seccomp filters—without requiring superuser privileges or background daemons.  Provide a Simple CLI Configuration Interface: Implement a streamlined command-line interface that allows users to launch and configure sandboxed applications via straightforward flags and simple configuration files.  Achieve Reliability with Headless & CLI Applications: Ensure that sandboxed command-line programs, CLI utilities, and headless applications run reliably within the constrained environment without unexpected breakage
+
+Secondary objectives
+
+Provide network policy toggles beyond simple on/off switches (e.g., restricted egress or local interface rules).
+Implement programmatic testing suites to verify namespace membership, procfs mappings, and seccomp enforcement automatically
+
+Scope
+Exclusively command-line and headless applications.  
+Target Platform: Modern Linux desktop/server environments with unprivileged user namespaces enabled.  
+Core Isolation Features:User namespace creation and UID/GID identity virtualization.  
+Network isolation (e.g., host vs. none network modes).  
+Filesystem view isolation via mount namespaces and bind-mount allowlists.  
+System call filtering using seccomp and capability reduction.  
+Profile & Configuration Management: Lightweight, human-readable static configuration files passed directly via the CLI.  
+Distribution Agnostic & Rootless: Operates entirely in user space without requiring root privileges, setuid binaries, or specific Linux Security Modules (LSMs) like AppArmor or SELinux. 
+
+Existing Approaches
+
+Current attempts to isolate processes on Linux desktop and server systems fall into three main categories:  
+- Server-Oriented Containerization (Docker, Podman, LXC):
+	- Mechanism: Utilize Linux kernel primitives—specifically namespaces, cgroups, and seccomp—to build fully isolated virtual environments with their own filesystems and init processes.  
+	- Target Use Case: Designed primarily for DevOps, server deployments, microservices, and isolated software development environments.  
+- Desktop Application Packaging and Sandboxing Frameworks (Flatpak, Snap):
+	- Mechanism: Flatpak relies on bubblewrap (utilizing unprivileged user namespaces) alongside desktop portals for resource access, while Snap relies heavily on AppArmor profiles and kernel-level mandatory access control.  
+	- Target Use Case: End-to-end application distribution, packaging, and runtime sandboxing through centralized or third-party app repositories. 
+- Low-Level Sandboxing Utilities & Setuid Binaries (Bubblewrap, Firejail):
+	- Mechanism: Firejail uses a large setuid-root executable to set up namespaces and seccomp filters for targeted processes. Bubblewrap provides a lightweight, unprivileged wrapper around user and mount namespaces.  
+	- Target Use Case: On-demand process confinement for desktop or CLI tools. 
+
+Limitations of Existing Approaches
+
+Over-Engineering & Complex Workflows for Desktop/CLI Use: Server containerization tools like Docker require complex CLI setups, image builds, rootful background daemons, and heavy filesystem overhead. They isolate entire Linux distribution environments rather than quickly executing a single local CLI binary.  
+Over-Privilege & Security Compromises in Desktop Frameworks: Desktop sandboxing solutions like Flatpak frequently suffer from over-privilege. Because strict confinement breaks complex software, many published applications include blanket permission overrides, effectively creating security holes in the sandbox boundary.  
+Portability & Distribution Dependencies: Frameworks like Snap depend strictly on specific Linux Security Modules (LSMs) like AppArmor. On distributions that use alternative security modules or run without AppArmor, key sandboxing features are unavailable or disabled. Furthermore, tools like Flatpak and Snap are inherently tied to package management and app store distribution models rather than sandboxing arbitrary local binaries.  
+Expanded Attack Surface & Usability Barriers: Utilities like Firejail rely on large setuid-root binaries, introducing significant privilege escalation risks if a vulnerability exists in the sandbox launcher itself.  Minimalist utilities like Bubblewrap are rootless and secure, but they operate at a low level. Users must manually construct complex CLI flags to explicitly bind-mount every individual directory, device, and system path required for a process to execute, making daily interactive use tedious and error-prone.  
+Lack of a Simple, Rootless, File-Driven CLI Tool: There is a distinct gap for a lightweight, distribution-agnostic tool that allows developers and terminal users to run command-line binaries inside an unprivileged namespace sandbox using simple, declarative static configuration files.
+
+System Overview
+The system is a lightweight, rootless application sandboxing framework designed for Linux environments. It provides on-demand process confinement for command-line (CLI) and headless applications without requiring elevated root privileges, background system daemons, or setuid binaries. Operating entirely in user space, the sandbox leverages Linux kernel isolation primitives—specifically user namespaces (CLONE_NEWUSER), network namespaces (CLONE_NEWNET), mount namespaces, and seccomp system call filters—to isolate host processes.  The runtime utilizes a dual-process parent-child model synchronized over inter-process communication (IPC) pipes. The parent process manages host-side configuration and maps the child’s execution context inside /proc/<pid>/uid_map and /proc/<pid>/gid_map. The child process unshares kernel namespaces, configures its isolated environment, drops capability sets, applies system call filters, and executes the target binary via execvp. Configuration is driven by static, human-readable declarative files (JSON or TOML) passed directly through the CLI, allowing developers and system administrators to define filesystem bind-mount allowlists, network access policies, and permission flags on a per-execution basis
+
+Module Description
+The system architecture is divided into modular components handling execution control, namespace staging, configuration parsing, and system call filtering:
+1. CLI Entry & Argument Parsing Module (cli)Function: Serves as the primary interface for user interaction. It parses command-line flags (e.g., target binary paths, network toggles, and configuration file paths), validates platform dependencies (ensuring execution on Linux with unprivileged user namespaces enabled), and initializes logging and diagnostics.  
+2. Configuration & Profile Parser Module (config)Function: Reads and parses static JSON or TOML policy profiles. It converts declarative configuration settings—such as filesystem bind-mount allowlists, network policies (host vs. none), and capability restrictions—into structured runtime parameters passed to the sandbox launcher.  
+3. Parent Synchronization & UID/GID Mapping Module (parent)Function: Manages process orchestration and kernel mapping writebacks. It forks the child process, listens for readiness signals across unidirectional IPC pipes, writes user and group mappings to /proc/<pid>/uid_map, /proc/<pid>/gid_map, and /proc/<pid>/setgroups, and signals the child process to complete execution. It remains active to await process termination and handle exit codes.  
+4. Child Sandbox Execution Module (child)Function: Prepares and enforces the isolated process environment. It invokes kernel namespace disassociation (unshare), drops supplementary group memberships, waits for parent synchronization signals, establishes namespace root identities (uid=0, gid=0), and executes the target application using execvp.  
+5. Filesystem & Mount Isolation Module (mount)Function: Configures mount namespaces to restrict the sandboxed process's view of the host filesystem. It handles private mount points, constructs chroot or pivot_root directory trees, and applies bind-mount allowlists specified in the configuration profile.  
+6. Seccomp & Capability Bounding Module (security)Function: Restricts hardware and kernel operations within the container. It configures Secure Computing Mode (seccomp) filters to block prohibited system calls and drops POSIX capabilities from the bounding set before handing execution over to the target binary.  
+7. Diagnostics & Verification Module (diag)Function: Provides runtime verification and debugging capabilities. It inspects /proc/self/uid_map, /proc/self/gid_map, and /proc/self/status inside the sandboxed environment to log and verify active namespace boundaries and capability sets during execution.  
+
+Programming languages
+
+Go (83.0%): Primary implementation language. Selected for its low-level system call interfaces (syscall, golang.org/x/sys/unix), strong concurrency primitives, static compilation model, and memory safety. Go provides direct access to Linux kernel namespace management and process execution calls without CGO overhead.  
+Starlark (10.3%): Embedded configuration and build script language used to define build targets, test rules, and isolation profiles deterministically.
+Python (6.6%): Legacy implementation language used during early Phase 2 Proof-of-Concept (PoC) exploration and rapid prototyping. Retained in the repository for validation benchmarking, test fixtures, and reference scripts.  
+Shell (0.1%): Utility shell scripts (bash/sh) used for automated integration testing, setup bootstrapping, procfs verification, and environment preparation. 
+
+Frameworks & Libraries
+
+Go Standard Library (os, os/exec, syscall, testing, context, sync, time): Serves as the core runtime environment for low-level system calls, process management, file I/O operations, asynchronous concurrency handling, and unit/integration test orchestration.
+Go System & Unix Extensions: Provides low-level interfaces to Unix system calls, kernel parameters, namespace operations, and sandboxing primitives required for process isolation.
+Go Subprocess Control: Ensures secure binary and command execution by resolving executable paths explicitly, preventing path spoofing vulnerabilities during container/sandbox invocation.
+
+Tools
+
+Bazel: Acts as the primary build automation and dependency management tool, utilizing rules such as go_library and go_test for reproducible, isolated compilation and testing.
+Go Toolchain: Used for standard Go compilation, package management, and executing unit and end-to-end integration test suites.
+Container & Namespace Isolation Primitives: Utilizes Linux namespaces, chroot/pivot_root operations, and cgroups to achieve secure sandbox process isolation.
+Git & Version Control: Manages source code versioning, branch integration, and collaborative code reviews.
