@@ -97,7 +97,10 @@ the CPU limit. If that controller is unavailable, configure
 `cpu_limit_percent: 0` or provide the required delegation.
 Aggregate memory and process limits are also disabled by default. Explicit
 `memory_limit_gb` and `max_processes` values require delegated `memory` and
-`pids` controllers in the same writable cgroup-v2 hierarchy.
+`pids` controllers in the same writable cgroup-v2 hierarchy. A CPU percentage
+is a quota relative to one CPU over the selected period. `max_processes` maps
+to `pids.max`, which counts sandbox infrastructure and kernel tasks, including
+Go runtime threads.
 
 The default security policy drops `ALL` capabilities and uses a killing
 policy for blocked syscalls. Only `kill` and `trap` are accepted for that

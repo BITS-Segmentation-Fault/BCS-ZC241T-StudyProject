@@ -46,7 +46,6 @@ go_library(
     name = "resources",
     srcs = glob(["resources/*.go"], exclude = ["resources/*_test.go"]),
     importpath = "sandbox/sandbox/resources",
-    deps = [":config"],
 )
 
 go_library(
@@ -195,7 +194,6 @@ go_test(
     name = "resources_test",
     srcs = glob(["resources/*.go"]),
     importpath = "sandbox/sandbox/resources",
-    deps = [":config"],
 )
 
 go_test(
