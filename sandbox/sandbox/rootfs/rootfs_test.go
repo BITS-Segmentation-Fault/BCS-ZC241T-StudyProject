@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -76,25 +78,24 @@ func minimalArchive(t *testing.T) []byte {
 		archiveEntry{name: "./bin/busybox", kind: tar.TypeReg, mode: 04755, body: []byte("busybox")},
 		archiveEntry{name: "./bin/sh", kind: tar.TypeSymlink, mode: 0777, link: "busybox"},
 		archiveEntry{name: "./bin/echo", kind: tar.TypeSymlink, mode: 0777, link: "/bin/busybox"},
-		archiveEntry{name: "./etc/alpine-release", kind: tar.TypeReg, mode: 0644, body: []byte("3.24.1\n")},
 	)
 }
 
 const testReleaseURL = "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/rootfs.tar.gz"
 
-func archiveRelease(t *testing.T, body []byte) releaseInfo {
+func archiveRelease(t *testing.T, body []byte) managedRelease {
 	t.Helper()
-	production, ok := releaseCatalog[runtime.GOARCH]
+	production, ok := defaultManagedSource.Releases[runtime.GOARCH]
 	if !ok {
 		t.Fatalf("unsupported test architecture %q", runtime.GOARCH)
 	}
 	digest := sha256.Sum256(body)
-	return releaseInfo{
-		AlpineArch:  production.AlpineArch,
-		ArchiveName: "synthetic-rootfs.tar.gz",
-		URL:         testReleaseURL,
-		SHA256:      hex.EncodeToString(digest[:]),
-		TreeSHA256:  archiveTreeDigest(t, body),
+	return managedRelease{
+		Architecture:  production.Architecture,
+		ArchiveName:   "synthetic-rootfs.tar.gz",
+		URL:           testReleaseURL,
+		ArchiveSHA256: hex.EncodeToString(digest[:]),
+		TreeSHA256:    archiveTreeDigest(t, body),
 	}
 }
 
@@ -137,6 +138,11 @@ func testResponse(status int, body []byte) *http.Response {
 func testProvisioner(t *testing.T, body []byte, status int, requests *atomic.Int32) *Provisioner {
 	t.Helper()
 	release := archiveRelease(t, body)
+	source := managedSource{
+		Provider: "test-provider",
+		Version:  "test-version",
+		Releases: map[string]managedRelease{runtime.GOARCH: release},
+	}
 	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if requests != nil {
 			requests.Add(1)
@@ -149,8 +155,19 @@ func testProvisioner(t *testing.T, body []byte, status int, requests *atomic.Int
 	return &Provisioner{
 		CacheDir: t.TempDir(),
 		Client:   &http.Client{Transport: transport, Timeout: 2 * time.Second},
-		releases: map[string]releaseInfo{runtime.GOARCH: release},
+		source:   &source,
 	}
+}
+
+func testCachePath(t *testing.T, p *Provisioner) string {
+	t.Helper()
+	source := p.sourceForProvisioning()
+	release := source.Releases[runtime.GOARCH]
+	target, err := cachePath(p.CacheDir, source, release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
 }
 
 func TestExplicitMissingRootfsDoesNotTouchCacheOrNetwork(t *testing.T) {
@@ -180,7 +197,7 @@ func TestProvisionAndReuseOffline(t *testing.T) {
 	if requests.Load() != 1 {
 		t.Fatalf("request count = %d, want 1", requests.Load())
 	}
-	if err := validatePublishedRootfs(target, p.releases[runtime.GOARCH]); err != nil {
+	if err := validatePublishedRootfs(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err != nil {
 		t.Fatalf("published rootfs is invalid: %v", err)
 	}
 	if got, err := p.Resolve(""); err != nil || got != target {
@@ -188,6 +205,71 @@ func TestProvisionAndReuseOffline(t *testing.T) {
 	}
 	if requests.Load() != 1 {
 		t.Fatalf("offline reuse made another request: %d", requests.Load())
+	}
+}
+
+func TestSelectedManagedSourceControlsCacheAndManifest(t *testing.T) {
+	body := minimalArchive(t)
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	source := p.sourceForProvisioning()
+	release := source.Releases[runtime.GOARCH]
+	target, err := p.Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(p.CacheDir, "bcs-zc241t-sandbox", "rootfs", "test-provider", "test-version", release.Architecture)
+	if target != want {
+		t.Fatalf("managed cache path = %q, want %q", target, want)
+	}
+	data, err := os.ReadFile(filepath.Join(target, manifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got manifest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := manifestFor(source, release); !reflect.DeepEqual(got, want) {
+		t.Fatalf("manifest = %#v, want %#v", got, want)
+	}
+}
+
+func TestInvalidManagedMetadataDoesNotTouchCacheOrNetwork(t *testing.T) {
+	body := minimalArchive(t)
+	for _, tt := range []struct {
+		name   string
+		update func(*managedSource, *managedRelease)
+	}{
+		{name: "empty provider", update: func(source *managedSource, _ *managedRelease) { source.Provider = "" }},
+		{name: "traversal version", update: func(source *managedSource, _ *managedRelease) { source.Version = "../version" }},
+		{name: "empty architecture", update: func(_ *managedSource, release *managedRelease) { release.Architecture = "" }},
+		{name: "traversal archive name", update: func(_ *managedSource, release *managedRelease) { release.ArchiveName = "../archive" }},
+		{name: "invalid archive digest", update: func(_ *managedSource, release *managedRelease) { release.ArchiveSHA256 = strings.Repeat("0", 63) }},
+		{name: "invalid tree digest", update: func(_ *managedSource, release *managedRelease) { release.TreeSHA256 = strings.Repeat("g", 64) }},
+		{name: "invalid URL", update: func(_ *managedSource, release *managedRelease) { release.URL = "http://example.test/rootfs.tar.gz" }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var requests atomic.Int32
+			p := testProvisioner(t, body, http.StatusOK, &requests)
+			source := p.sourceForProvisioning()
+			release := source.Releases[runtime.GOARCH]
+			tt.update(&source, &release)
+			source.Releases[runtime.GOARCH] = release
+			p.source = &source
+			if _, err := p.Resolve(""); err == nil {
+				t.Fatal("Resolve() accepted invalid managed metadata")
+			}
+			if requests.Load() != 0 {
+				t.Fatalf("metadata validation made %d network requests", requests.Load())
+			}
+			entries, err := os.ReadDir(p.CacheDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("metadata validation modified cache: %v", entries)
+			}
+		})
 	}
 }
 
@@ -214,13 +296,14 @@ func TestProvisioningFailuresLeaveNoPublishedRootfs(t *testing.T) {
 	body := minimalArchive(t)
 	var requests atomic.Int32
 	p := testProvisioner(t, body, http.StatusOK, &requests)
-	release := p.releases[runtime.GOARCH]
-	release.SHA256 = strings.Repeat("0", 64)
-	p.releases[runtime.GOARCH] = release
+	source := p.sourceForProvisioning()
+	release := source.Releases[runtime.GOARCH]
+	release.ArchiveSHA256 = strings.Repeat("0", 64)
+	source.Releases[runtime.GOARCH] = release
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "configure rootfs_source") {
 		t.Fatalf("digest failure = %v, want actionable cache/custom-rootfs error", err)
 	}
-	target, _ := cachePath(p.CacheDir, runtime.GOARCH)
+	target := testCachePath(t, p)
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("failed provisioning left published rootfs: %v", err)
 	}
@@ -246,7 +329,8 @@ func TestProvisioningFailureAndResponseLimits(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p := testProvisioner(t, body, tt.status, nil)
-			release := p.releases[runtime.GOARCH]
+			source := p.sourceForProvisioning()
+			release := source.Releases[runtime.GOARCH]
 			if tt.maxBytes != 0 {
 				p.maxArchiveBytes = tt.maxBytes
 			}
@@ -258,9 +342,9 @@ func TestProvisioningFailureAndResponseLimits(t *testing.T) {
 				})
 			}
 			if tt.badDigest {
-				release.SHA256 = strings.Repeat("f", 64)
+				release.ArchiveSHA256 = strings.Repeat("f", 64)
 			}
-			p.releases[runtime.GOARCH] = release
+			source.Releases[runtime.GOARCH] = release
 			if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Resolve() error = %v, want %q", err, tt.want)
 			}
@@ -308,7 +392,7 @@ func TestAtomicRenameFailureCleansTemporaryRootfs(t *testing.T) {
 	if gotFlags != unix.RENAME_NOREPLACE {
 		t.Fatalf("first publication flags = %#x, want RENAME_NOREPLACE", gotFlags)
 	}
-	target, _ := cachePath(p.CacheDir, runtime.GOARCH)
+	target := testCachePath(t, p)
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("rename failure left target: %v", err)
 	}
@@ -331,10 +415,7 @@ func TestProvisioningReportsTemporaryCleanupFailure(t *testing.T) {
 		!strings.Contains(err.Error(), "cannot clean temporary rootfs") {
 		t.Fatalf("Resolve() error = %v, want publication and cleanup failures", err)
 	}
-	target, err := cachePath(p.CacheDir, runtime.GOARCH)
-	if err != nil {
-		t.Fatal(err)
-	}
+	target := testCachePath(t, p)
 	temporaryPaths, err := filepath.Glob(filepath.Join(filepath.Dir(target), ".rootfs-*"))
 	if err != nil {
 		t.Fatal(err)
@@ -538,9 +619,6 @@ func TestSecureExtractionAllowsInternalLinksAndStripsSpecialBits(t *testing.T) {
 	if err := extractArchive(archivePath, destination, defaultRootfsLimits); err != nil {
 		t.Fatalf("extractArchive() error = %v", err)
 	}
-	if err := validateRootfsLayout(destination); err != nil {
-		t.Fatal(err)
-	}
 	info, err := os.Stat(filepath.Join(destination, "bin", "busybox"))
 	if err != nil {
 		t.Fatal(err)
@@ -578,7 +656,7 @@ func TestManifestValidationRejectsUnexpectedFields(t *testing.T) {
 	if err := os.WriteFile(manifestPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePublishedRootfs(target, p.releases[runtime.GOARCH]); err == nil {
+	if err := validatePublishedRootfs(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err == nil {
 		t.Fatal("validatePublishedRootfs() accepted unexpected manifest field")
 	}
 }
@@ -593,7 +671,7 @@ func TestManifestValidationIsBounded(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(target, manifestName), bytes.Repeat([]byte("x"), maxManifestBytes+1), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePublishedRootfs(target, p.releases[runtime.GOARCH]); err == nil || !strings.Contains(err.Error(), "manifest exceeds") {
+	if err := validatePublishedRootfs(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err == nil || !strings.Contains(err.Error(), "manifest exceeds") {
 		t.Fatalf("validatePublishedRootfs() error = %v, want bounded manifest error", err)
 	}
 }
@@ -686,7 +764,7 @@ func TestModifiedCachedTreeIsRejectedAndPreservedOffline(t *testing.T) {
 				t.Fatal(err)
 			}
 			tt.modify(t, target)
-			if err := validatePublishedRootfs(target, p.releases[runtime.GOARCH]); err == nil {
+			if err := validatePublishedRootfs(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err == nil {
 				t.Fatal("validatePublishedRootfs() accepted a modified tree")
 			}
 			p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -745,11 +823,11 @@ func TestCacheSymlinksAndUnsafeModesFailClosed(t *testing.T) {
 
 	t.Run("lock symlink", func(t *testing.T) {
 		cache := t.TempDir()
-		version := filepath.Join(cache, "bcs-zc241t-sandbox", "rootfs", provider, version)
-		if err := os.MkdirAll(version, 0700); err != nil {
+		managedVersion := filepath.Join(cache, "bcs-zc241t-sandbox", "rootfs", defaultManagedSource.Provider, defaultManagedSource.Version)
+		if err := os.MkdirAll(managedVersion, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(filepath.Join(t.TempDir(), "lock"), filepath.Join(version, lockName)); err != nil {
+		if err := os.Symlink(filepath.Join(t.TempDir(), "lock"), filepath.Join(managedVersion, lockName)); err != nil {
 			t.Fatal(err)
 		}
 		p := Provisioner{CacheDir: cache}
@@ -862,26 +940,28 @@ func TestReleaseMetadataIsPinned(t *testing.T) {
 		},
 	}
 	for goArch, expected := range want {
-		release, ok := releaseCatalog[goArch]
-		if !ok || release.AlpineArch != expected.alpineArch || release.ArchiveName != expected.archive || release.SHA256 != expected.sha256 || release.TreeSHA256 != expected.treeSHA256 {
-			t.Errorf("releaseCatalog[%q] = %+v, want %+v", goArch, release, expected)
+		release, ok := defaultManagedSource.Releases[goArch]
+		if !ok || release.Architecture != expected.alpineArch || release.ArchiveName != expected.archive || release.ArchiveSHA256 != expected.sha256 || release.TreeSHA256 != expected.treeSHA256 {
+			t.Errorf("defaultManagedSource.Releases[%q] = %+v, want %+v", goArch, release, expected)
 		}
 	}
 }
 
 func TestReleaseURLValidation(t *testing.T) {
 	valid := "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/rootfs.tar.gz"
-	if _, err := validateReleaseURL(valid, false); err != nil {
+	if _, err := validateReleaseURL(valid); err != nil {
 		t.Fatalf("valid release URL rejected: %v", err)
+	}
+	if _, err := validateReleaseURL("https://mirror.example/releases/rootfs.tar.gz"); err != nil {
+		t.Fatalf("provider-neutral release URL rejected: %v", err)
 	}
 	for _, raw := range []string{
 		"http://dl-cdn.alpinelinux.org/rootfs.tar.gz",
-		"https://mirror.example/rootfs.tar.gz",
 		"https://user:pass@dl-cdn.alpinelinux.org/rootfs.tar.gz",
 		"https://dl-cdn.alpinelinux.org/rootfs.tar.gz?redirect=1",
 		"https://dl-cdn.alpinelinux.org/alpine/../rootfs.tar.gz",
 	} {
-		if _, err := validateReleaseURL(raw, false); err == nil {
+		if _, err := validateReleaseURL(raw); err == nil {
 			t.Errorf("validateReleaseURL(%q) accepted malformed or untrusted URL", raw)
 		}
 	}
