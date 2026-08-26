@@ -18,7 +18,7 @@ func TestPinnedAlpineArchives(t *testing.T) {
 	}
 	for _, goArch := range []string{"amd64", "arm64"} {
 		t.Run(goArch, func(t *testing.T) {
-			release, err := ReleaseInfoFor(goArch)
+			release, err := releaseInfoFor(goArch)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -79,15 +79,14 @@ func minimalArchive(t *testing.T) []byte {
 
 const testReleaseURL = "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/rootfs.tar.gz"
 
-func archiveRelease(t *testing.T, body []byte) ReleaseInfo {
+func archiveRelease(t *testing.T, body []byte) releaseInfo {
 	t.Helper()
 	production, ok := releaseCatalog[runtime.GOARCH]
 	if !ok {
 		t.Fatalf("unsupported test architecture %q", runtime.GOARCH)
 	}
 	digest := sha256.Sum256(body)
-	return ReleaseInfo{
-		GoArch:          runtime.GOARCH,
+	return releaseInfo{
 		AlpineArch:      production.AlpineArch,
 		ArchiveName:     "synthetic-rootfs.tar.gz",
 		URL:             testReleaseURL,
@@ -148,39 +147,7 @@ func testProvisioner(t *testing.T, body []byte, status int, requests *atomic.Int
 	return &Provisioner{
 		CacheDir: t.TempDir(),
 		Client:   &http.Client{Transport: transport, Timeout: 2 * time.Second},
-		releases: map[string]ReleaseInfo{runtime.GOARCH: release},
-	}
-}
-
-func TestReleaseInfoAndCachePath(t *testing.T) {
-	tests := []struct {
-		goArch     string
-		alpineArch string
-	}{
-		{goArch: "amd64", alpineArch: "x86_64"},
-		{goArch: "arm64", alpineArch: "aarch64"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.goArch, func(t *testing.T) {
-			release, err := ReleaseInfoFor(tt.goArch)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if release.AlpineArch != tt.alpineArch {
-				t.Fatalf("AlpineArch = %q, want %q", release.AlpineArch, tt.alpineArch)
-			}
-			path, err := CachePath("/cache", tt.goArch)
-			if err != nil {
-				t.Fatal(err)
-			}
-			want := filepath.Join("/cache", "bcs-zc241t-sandbox", "rootfs", "alpine", "3.24.1", tt.alpineArch)
-			if path != want {
-				t.Fatalf("CachePath() = %q, want %q", path, want)
-			}
-		})
-	}
-	if _, err := ReleaseInfoFor("ppc64le"); err == nil {
-		t.Fatal("ReleaseInfoFor() accepted unsupported architecture")
+		releases: map[string]releaseInfo{runtime.GOARCH: release},
 	}
 }
 
@@ -251,7 +218,7 @@ func TestProvisioningFailuresLeaveNoPublishedRootfs(t *testing.T) {
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "configure rootfs_source") {
 		t.Fatalf("digest failure = %v, want actionable cache/custom-rootfs error", err)
 	}
-	target, _ := CachePath(p.CacheDir, runtime.GOARCH)
+	target, _ := cachePath(p.CacheDir, runtime.GOARCH)
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("failed provisioning left published rootfs: %v", err)
 	}
@@ -323,7 +290,7 @@ func TestAtomicRenameFailureCleansTemporaryRootfs(t *testing.T) {
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "atomically publish") {
 		t.Fatalf("rename failure = %v", err)
 	}
-	target, _ := CachePath(p.CacheDir, runtime.GOARCH)
+	target, _ := cachePath(p.CacheDir, runtime.GOARCH)
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("rename failure left target: %v", err)
 	}
@@ -636,7 +603,7 @@ func TestCacheSymlinksAndUnsafeModesFailClosed(t *testing.T) {
 
 	t.Run("lock symlink", func(t *testing.T) {
 		cache := t.TempDir()
-		version := filepath.Join(cache, "bcs-zc241t-sandbox", "rootfs", Provider, Version)
+		version := filepath.Join(cache, "bcs-zc241t-sandbox", "rootfs", provider, version)
 		if err := os.MkdirAll(version, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -733,15 +700,30 @@ func TestCacheSymlinksAndUnsafeModesFailClosed(t *testing.T) {
 }
 
 func TestReleaseMetadataIsPinned(t *testing.T) {
-	release, err := ReleaseInfoFor("amd64")
-	if err != nil {
-		t.Fatal(err)
+	want := map[string]struct {
+		alpineArch string
+		archive    string
+		sha256     string
+		treeSHA256 string
+	}{
+		"amd64": {
+			alpineArch: "x86_64",
+			archive:    "alpine-minirootfs-3.24.1-x86_64.tar.gz",
+			sha256:     "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
+			treeSHA256: "f35a4d7394df512b1727eebe935f54cc38a4b15154e56ad74722cb3683c4eb9f",
+		},
+		"arm64": {
+			alpineArch: "aarch64",
+			archive:    "alpine-minirootfs-3.24.1-aarch64.tar.gz",
+			sha256:     "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
+			treeSHA256: "d685f267ee308d816da007134d44d1e661b4a69ca81ede67b19381eeb25dbb66",
+		},
 	}
-	if release.URL != "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz" {
-		t.Fatalf("unexpected release URL %q", release.URL)
-	}
-	if release.MaxArchiveBytes != 3698422 || release.SHA256 != "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081" || release.TreeSHA256 != "f35a4d7394df512b1727eebe935f54cc38a4b15154e56ad74722cb3683c4eb9f" {
-		t.Fatalf("unexpected amd64 release metadata: %+v", release)
+	for goArch, expected := range want {
+		release, ok := releaseCatalog[goArch]
+		if !ok || release.AlpineArch != expected.alpineArch || release.ArchiveName != expected.archive || release.SHA256 != expected.sha256 || release.TreeSHA256 != expected.treeSHA256 {
+			t.Errorf("releaseCatalog[%q] = %+v, want %+v", goArch, release, expected)
+		}
 	}
 }
 
@@ -779,5 +761,41 @@ func TestExplicitRootfsDirectoryIsReturnedUnchanged(t *testing.T) {
 	}
 	if got != source {
 		t.Fatalf("Resolve() = %q, want %q", got, source)
+	}
+}
+
+func TestExplicitRootfsValidation(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "file"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "parent"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, filepath.Join(root, "parent", "link")); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		path string
+	}{
+		{name: "relative", path: "relative-rootfs"},
+		{name: "final symlink", path: filepath.Join(root, "link")},
+		{name: "intermediate symlink", path: filepath.Join(root, "parent", "link", "nested")},
+		{name: "regular file", path: filepath.Join(root, "file")},
+		{name: "parent component", path: root + "/nested/../nested"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := validateExplicitRootfs(tt.path); err == nil {
+				t.Fatalf("validateExplicitRootfs(%q) accepted unsafe path", tt.path)
+			}
+		})
 	}
 }

@@ -23,8 +23,8 @@ import (
 )
 
 const (
-	Provider = "alpine"
-	Version  = "3.24.1"
+	provider = "alpine"
+	version  = "3.24.1"
 
 	manifestName = "manifest.json"
 	lockName     = ".lock"
@@ -33,11 +33,10 @@ const (
 	connectTimeout = 10 * time.Second
 )
 
-// ReleaseInfo contains the reviewed metadata for one pinned Alpine archive.
+// releaseInfo contains the reviewed metadata for one pinned Alpine archive.
 // MaxArchiveBytes is both the compressed-response limit and the reviewed
 // archive-size ceiling.
-type ReleaseInfo struct {
-	GoArch          string
+type releaseInfo struct {
 	AlpineArch      string
 	ArchiveName     string
 	URL             string
@@ -46,9 +45,8 @@ type ReleaseInfo struct {
 	MaxArchiveBytes int64
 }
 
-var releaseCatalog = map[string]ReleaseInfo{
+var releaseCatalog = map[string]releaseInfo{
 	"amd64": {
-		GoArch:          "amd64",
 		AlpineArch:      "x86_64",
 		ArchiveName:     "alpine-minirootfs-3.24.1-x86_64.tar.gz",
 		URL:             "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz",
@@ -57,7 +55,6 @@ var releaseCatalog = map[string]ReleaseInfo{
 		MaxArchiveBytes: 3698422,
 	},
 	"arm64": {
-		GoArch:          "arm64",
 		AlpineArch:      "aarch64",
 		ArchiveName:     "alpine-minirootfs-3.24.1-aarch64.tar.gz",
 		URL:             "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz",
@@ -76,31 +73,29 @@ type Provisioner struct {
 
 	// releases is intentionally private: tests replace the catalog with small
 	// synthetic archives, while production always uses releaseCatalog above.
-	releases      map[string]ReleaseInfo
+	releases      map[string]releaseInfo
 	makeTemp      func(string, string) (string, error)
 	renamePath    func(string, string) error
 	allowTestURLs bool
 }
 
-// ReleaseInfoFor returns the pinned metadata for a supported Go architecture.
-func ReleaseInfoFor(goArch string) (ReleaseInfo, error) {
+func releaseInfoFor(goArch string) (releaseInfo, error) {
 	release, ok := releaseCatalog[goArch]
 	if !ok {
-		return ReleaseInfo{}, fmt.Errorf("unsupported sandbox architecture %q", goArch)
+		return releaseInfo{}, fmt.Errorf("unsupported sandbox architecture %q", goArch)
 	}
 	return release, nil
 }
 
-// CachePath returns the managed rootfs path for goArch beneath cacheDir.
-func CachePath(cacheDir, goArch string) (string, error) {
-	release, err := ReleaseInfoFor(goArch)
+func cachePath(cacheDir, goArch string) (string, error) {
+	release, err := releaseInfoFor(goArch)
 	if err != nil {
 		return "", err
 	}
 	if cacheDir == "" {
 		return "", fmt.Errorf("cache directory cannot be empty")
 	}
-	return filepath.Join(cacheDir, "bcs-zc241t-sandbox", "rootfs", Provider, Version, release.AlpineArch), nil
+	return filepath.Join(cacheDir, "bcs-zc241t-sandbox", "rootfs", provider, version, release.AlpineArch), nil
 }
 
 // Resolve returns a validated explicit rootfs or the completed managed rootfs.
@@ -123,7 +118,7 @@ func (p Provisioner) Resolve(source string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("unsupported sandbox architecture %q", goArch)
 	}
-	target, err := CachePath(cacheDir, goArch)
+	target, err := cachePath(cacheDir, goArch)
 	if err != nil {
 		return "", err
 	}
@@ -131,24 +126,22 @@ func (p Provisioner) Resolve(source string) (string, error) {
 }
 
 func validateExplicitRootfs(source string) (string, error) {
-	info, err := os.Stat(source)
+	fd, err := openDirectoryPath(source)
 	if err != nil {
 		return "", fmt.Errorf("configured rootfs_source %q is unavailable: %v", source, err)
 	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("configured rootfs_source %q is not a directory", source)
-	}
+	defer unix.Close(fd)
 	return source, nil
 }
 
-func (p Provisioner) catalog() map[string]ReleaseInfo {
+func (p Provisioner) catalog() map[string]releaseInfo {
 	if p.releases != nil {
 		return p.releases
 	}
 	return releaseCatalog
 }
 
-func (p Provisioner) provision(cacheDir, target string, release ReleaseInfo) (string, error) {
+func (p Provisioner) provision(cacheDir, target string, release releaseInfo) (string, error) {
 	versionDir, versionFD, err := ensureManagedVersionDir(cacheDir)
 	if err != nil {
 		return "", p.provisionError(release, target, err)
@@ -205,9 +198,6 @@ func (p Provisioner) provision(cacheDir, target string, release ReleaseInfo) (st
 	if err := writeManifest(extracted, release); err != nil {
 		return "", p.provisionError(release, target, err)
 	}
-	if err := syncPathFile(archivePath); err != nil {
-		return "", p.provisionError(release, target, err)
-	}
 	if err := syncDirectoryPath(extracted, "completed rootfs"); err != nil {
 		return "", p.provisionError(release, target, err)
 	}
@@ -220,11 +210,11 @@ func (p Provisioner) provision(cacheDir, target string, release ReleaseInfo) (st
 	return target, nil
 }
 
-func (p Provisioner) provisionError(release ReleaseInfo, target string, err error) error {
+func (p Provisioner) provisionError(release releaseInfo, target string, err error) error {
 	return fmt.Errorf("managed Alpine rootfs provisioning failed from %s: %v; cache: %s; configure rootfs_source to use a custom rootfs", release.URL, err, target)
 }
 
-func (p Provisioner) download(ctx context.Context, release ReleaseInfo, destination string) error {
+func (p Provisioner) download(ctx context.Context, release releaseInfo, destination string) error {
 	origin, err := validateReleaseURL(release.URL, p.allowTestURLs)
 	if err != nil {
 		return err
@@ -350,10 +340,10 @@ type manifest struct {
 	TreeSHA256   string `json:"tree_sha256"`
 }
 
-func manifestFor(release ReleaseInfo) manifest {
+func manifestFor(release releaseInfo) manifest {
 	return manifest{
-		Provider:     Provider,
-		Version:      Version,
+		Provider:     provider,
+		Version:      version,
 		Architecture: release.AlpineArch,
 		Archive:      release.ArchiveName,
 		SHA256:       release.SHA256,
@@ -361,7 +351,7 @@ func manifestFor(release ReleaseInfo) manifest {
 	}
 }
 
-func writeManifest(root string, release ReleaseInfo) error {
+func writeManifest(root string, release releaseInfo) error {
 	data, err := json.MarshalIndent(manifestFor(release), "", "  ")
 	if err != nil {
 		return fmt.Errorf("cannot encode rootfs manifest: %v", err)
@@ -402,7 +392,7 @@ func writeManifest(root string, release ReleaseInfo) error {
 	return nil
 }
 
-func validatePublishedRootfs(root string, release ReleaseInfo) error {
+func validatePublishedRootfs(root string, release releaseInfo) error {
 	rootFD, err := openDirectoryPath(root)
 	if err != nil {
 		return err
@@ -411,7 +401,7 @@ func validatePublishedRootfs(root string, release ReleaseInfo) error {
 	return validatePublishedRootfsFD(rootFD, release)
 }
 
-func validatePublishedRootfsAt(versionFD int, targetName string, release ReleaseInfo) error {
+func validatePublishedRootfsAt(versionFD int, targetName string, release releaseInfo) error {
 	rootFD, err := openDirectoryAt(versionFD, targetName)
 	if err != nil {
 		return err
@@ -420,7 +410,7 @@ func validatePublishedRootfsAt(versionFD int, targetName string, release Release
 	return validatePublishedRootfsFD(rootFD, release)
 }
 
-func validatePublishedRootfsFD(rootFD int, release ReleaseInfo) error {
+func validatePublishedRootfsFD(rootFD int, release releaseInfo) error {
 	if err := validateManagedDirectory(rootFD, "published rootfs"); err != nil {
 		return err
 	}
@@ -477,15 +467,6 @@ func validatePublishedRootfsFD(rootFD int, release ReleaseInfo) error {
 		return fmt.Errorf("published rootfs tree SHA-256 mismatch: got %s, want %s", gotTree, release.TreeSHA256)
 	}
 	return nil
-}
-
-func syncPathFile(path string) error {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return fmt.Errorf("cannot open %s for fsync: %v", path, err)
-	}
-	defer unix.Close(fd)
-	return syncDirectory(fd, path)
 }
 
 func syncDirectoryPath(path, label string) error {
