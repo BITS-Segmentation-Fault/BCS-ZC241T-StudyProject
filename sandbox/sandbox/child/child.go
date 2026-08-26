@@ -78,7 +78,7 @@ func Child(cfg config.Config, p2cRFd, c2pWFd int) int {
 		return 1
 	}
 
-	if err := resources.ApplyInitialStorageLimit(cfg.Storage); err != nil {
+	if err := resources.ApplyFileSizeLimit(cfg.FileSizeLimitMB); err != nil {
 		childLog(fmt.Sprintf("RESOURCE FAILURE: %v", err))
 		return 1
 	}
@@ -161,12 +161,12 @@ func Child(cfg config.Config, p2cRFd, c2pWFd int) int {
 		return 1
 	}
 
-	if err := security.ApplySeccompFiltersCustom(cfg.SeccompDefaultAction, cfg.BlockedSyscalls); err != nil {
+	if err := security.ApplySeccompFiltersCustom(cfg.BlockedSyscallAction, cfg.BlockedSyscalls); err != nil {
 		childLog(fmt.Sprintf("SECCOMP FAILURE: %v", err))
 		return 1
 	}
 
-	execArgs := cfg.CommandLine()
+	execArgs := append([]string(nil), cfg.Command...)
 	if len(execArgs) == 0 {
 		childLog("EXEC FAILED: no command configured")
 		return 1

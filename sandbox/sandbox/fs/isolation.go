@@ -100,7 +100,7 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount) (err error)
 			return fmt.Errorf("failed to bind mount %q to %q: %v", source.HostPath, source.ContainerPath, err)
 		}
 		mounted = append(mounted, target)
-		if source.ReadOnly {
+		if !source.Writable {
 			if err = syscall.Mount("", target, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_REC, ""); err != nil {
 				return fmt.Errorf("failed to remount bind target %q read-only: %v", source.ContainerPath, err)
 			}

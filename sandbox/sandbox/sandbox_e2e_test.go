@@ -106,19 +106,14 @@ func makeProbeRootfs(t *testing.T, probe string) string {
 func writeSandboxConfig(t *testing.T, rootfs, mode, probeArg string) string {
 	t.Helper()
 	configPath := filepath.Join(t.TempDir(), "sandbox.yaml")
-	contents := fmt.Sprintf(`binary_path: /bin/probe
-args: [%q]
+	contents := fmt.Sprintf(`command: [/bin/probe, %q]
 env_vars: [PROBE_VALUE=probe-value]
 env_whitelist: []
 read_only_root: false
-seccomp_default_action: allow
+blocked_syscall_action: kill
 blocked_syscalls: []
 drop_capabilities: []
-storage:
-  initial_limit_mb: 100
-  absolute_maximum_mb: 100
-  expansion_policy: none
-  increment_step_mb: 0
+file_size_limit_mb: 0
 cpu_limit_percent: 0
 memory_limit_gb: 0
 max_processes: 0

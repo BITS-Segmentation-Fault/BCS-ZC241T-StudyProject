@@ -23,13 +23,14 @@ const (
 )
 
 const (
-	BPF_LD  = 0x00
-	BPF_W   = 0x00
-	BPF_ABS = 0x20
-	BPF_JMP = 0x05
-	BPF_RET = 0x06
-	BPF_K   = 0x00
-	BPF_JEQ = 0x10
+	BPF_LD   = 0x00
+	BPF_W    = 0x00
+	BPF_ABS  = 0x20
+	BPF_JMP  = 0x05
+	BPF_RET  = 0x06
+	BPF_K    = 0x00
+	BPF_JEQ  = 0x10
+	BPF_JSET = 0x40
 
 	seccompDataArchOffset = 4
 	seccompDataNrOffset   = 0
@@ -53,10 +54,6 @@ func actionToReturn(action config.SeccompAction) (uint32, error) {
 		return SECCOMP_RET_KILL_PROCESS, nil
 	case config.ActionTrap:
 		return SECCOMP_RET_TRAP, nil
-	case config.ActionLog:
-		return SECCOMP_RET_LOG, nil
-	case config.ActionAllow:
-		return SECCOMP_RET_ALLOW, nil
 	default:
 		return 0, fmt.Errorf("invalid seccomp action %q", action)
 	}
@@ -88,20 +85,40 @@ func ApplySeccompFilters() error {
 // ApplySeccompFiltersCustom installs an architecture-guarded filter. The
 // architecture registry is split into build-tagged files so a cross-build
 // cannot accidentally encode amd64 syscall numbers into an arm64 binary.
-func ApplySeccompFiltersCustom(defaultAction config.SeccompAction, blockedSyscalls []string) error {
+func ApplySeccompFiltersCustom(blockedSyscallAction config.SeccompAction, blockedSyscalls []string) error {
 	if auditArchitecture == 0 {
 		return fmt.Errorf("seccomp is unsupported on this Linux architecture")
 	}
-	returnAction, err := actionToReturn(defaultAction)
-	if err != nil {
-		return err
-	}
-	numbers, err := blockedSyscallNumbers(blockedSyscalls)
+	instructions, err := buildFilter(blockedSyscallAction, blockedSyscalls)
 	if err != nil {
 		return err
 	}
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("failed to set PR_SET_NO_NEW_PRIVS: %v", err)
+	}
+
+	prog := sockFprog{len: uint16(len(instructions)), filter: &instructions[0]}
+	result, _, errno := syscall.Syscall6(
+		uintptr(unix.SYS_SECCOMP), SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC,
+		uintptr(unsafe.Pointer(&prog)), 0, 0, 0,
+	)
+	if errno != 0 {
+		return fmt.Errorf("kernel rejected seccomp filter loading: %w", errno)
+	}
+	if result != 0 {
+		return fmt.Errorf("kernel could not synchronize seccomp filter to thread %d", result)
+	}
+	return nil
+}
+
+func buildFilter(blockedSyscallAction config.SeccompAction, blockedSyscalls []string) ([]sockFilter, error) {
+	returnAction, err := actionToReturn(blockedSyscallAction)
+	if err != nil {
+		return nil, err
+	}
+	numbers, err := blockedSyscallNumbers(blockedSyscalls)
+	if err != nil {
+		return nil, err
 	}
 
 	instructions := []sockFilter{
@@ -117,14 +134,5 @@ func ApplySeccompFiltersCustom(defaultAction config.SeccompAction, blockedSyscal
 		)
 	}
 	instructions = append(instructions, sockFilter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW})
-
-	prog := sockFprog{len: uint16(len(instructions)), filter: &instructions[0]}
-	_, _, errno := syscall.Syscall6(
-		uintptr(unix.SYS_SECCOMP), SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC,
-		uintptr(unsafe.Pointer(&prog)), 0, 0, 0,
-	)
-	if errno != 0 {
-		return fmt.Errorf("kernel rejected seccomp filter loading: %v", errno)
-	}
-	return nil
+	return instructions, nil
 }

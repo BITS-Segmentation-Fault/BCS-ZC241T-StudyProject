@@ -28,8 +28,21 @@ func TestSandboxBinaryDiscoversConfigAfterOptions(t *testing.T) {
 	if err == nil {
 		t.Fatal("sandbox unexpectedly started without a command")
 	}
-	if !strings.Contains(string(output), "either binary_path or command must be provided") {
+	if !strings.Contains(string(output), "command must contain at least one element") {
 		t.Fatalf("config-ordering error was lost: %s", output)
+	}
+}
+
+func TestSandboxBinaryRejectsSecondYAMLDocument(t *testing.T) {
+	binary := sandboxTestBinary(t)
+	config := filepath.Join(t.TempDir(), "sandbox.yaml")
+	contents := "command: [/bin/echo]\n---\ncommand: [/bin/false]\n"
+	if err := writeFile(config, contents); err != nil {
+		t.Fatal(err)
+	}
+	output, err := exec.Command(binary, "--config", config).CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "more than one YAML document") {
+		t.Fatalf("sandbox accepted multiple YAML documents: err=%v output=%s", err, output)
 	}
 }
 
