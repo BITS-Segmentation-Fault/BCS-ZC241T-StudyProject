@@ -261,6 +261,7 @@ go_test(
         "args.go",
         "sandbox_e2e_test.go",
         "sandbox_managed_rootfs_e2e_test.go",
+        "sandbox_security_e2e_test.go",
         "sandbox_test_helpers_test.go",
     ],
     data = [":sandbox", ":testprobe"],
