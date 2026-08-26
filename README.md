@@ -76,7 +76,8 @@ then repeats the launch with unusable proxy settings to verify offline reuse.
 
 ## Platform and runtime requirements
 
-The program is Linux-only. Host and none modes are designed to work without
+The program is Linux-only and executable targets are currently limited to
+amd64 and arm64. Host and none modes are designed to work without
 global root when unprivileged user namespaces, mount namespaces, PID/UTS
 namespaces, `pivot_root`, `openat2`, the Linux new mount API
 (`open_tree`, `mount_setattr`, `move_mount`, and
@@ -105,10 +106,14 @@ require the relevant controllers to be enabled in a writable delegated
 cgroup-v2 hierarchy.
 
 The default security policy drops `ALL` capabilities and uses a killing
-policy for blocked syscalls. Only `kill` and `trap` are accepted for that
-policy. The denylist has an architecture guard but is not a complete syscall
-allowlist or a guarantee against hostile workloads. Configuration names are
-validated before a child or bridge is created. Use one `command` list in YAML or positional CLI arguments; public
+policy for blocked syscalls. Only `kill` and `trap` are accepted: `kill`
+terminates the process and `trap` delivers `SIGSYS`. The accepted blocked
+syscall names are `reboot`, `mount`, `ptrace`, `swapon`, `syslog`,
+`init_module`, `finit_module`, `delete_module`, `kcmp`, `process_vm_readv`,
+and `process_vm_writev`; `iopl` and `ioperm` are amd64-only. The denylist has
+an architecture guard but is not a complete syscall allowlist or a guarantee
+against hostile workloads. Configuration names are validated before a child
+or bridge is created. Use one `command` list in YAML or positional CLI arguments; public
 flags must precede the command, and `--` explicitly terminates the flag
 section. Environment names must be valid shell variable names and duplicate
 keys are rejected.

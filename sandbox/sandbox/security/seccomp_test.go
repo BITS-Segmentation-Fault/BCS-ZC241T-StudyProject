@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"sandbox/sandbox/config"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestBlockedSyscallNumbersRejectUnknownNames(t *testing.T) {
@@ -14,37 +16,56 @@ func TestBlockedSyscallNumbersRejectUnknownNames(t *testing.T) {
 	}
 }
 
-func TestBlockedSyscallNumbersPreserveOrder(t *testing.T) {
-	got, err := blockedSyscallNumbers([]string{"mount", "reboot"})
-	if err != nil {
-		t.Fatalf("blockedSyscallNumbers() error = %v", err)
+func TestBlockedSyscallNumbersRejectDuplicates(t *testing.T) {
+	if _, err := blockedSyscallNumbers([]string{"mount", "mount"}); err == nil {
+		t.Fatal("blockedSyscallNumbers() accepted a duplicate syscall")
 	}
-	if len(got) != 2 || got[0] != syscallNameToNumber["mount"] || got[1] != syscallNameToNumber["reboot"] {
-		t.Fatalf("blockedSyscallNumbers() = %v, want mount/reboot numbers", got)
+}
+
+func TestActions(t *testing.T) {
+	tests := []struct {
+		action config.SeccompAction
+		valid  bool
+	}{
+		{config.ActionKill, true},
+		{config.ActionTrap, true},
+		{config.SeccompAction("allow"), false},
+	}
+	for _, test := range tests {
+		_, err := actionToReturn(test.action)
+		if (err == nil) != test.valid {
+			t.Errorf("actionToReturn(%q) error = %v, valid = %v", test.action, err, test.valid)
+		}
 	}
 }
 
 func TestBuildFilterGuardsAuditArchitecture(t *testing.T) {
 	instructions, err := buildFilter(config.ActionKill, []string{"mount"})
+	if auditArchitecture == 0 {
+		if err == nil {
+			t.Fatal("buildFilter() accepted an unsupported architecture")
+		}
+		return
+	}
 	if err != nil {
 		t.Fatalf("buildFilter() error = %v", err)
 	}
 	if len(instructions) < 6 {
 		t.Fatalf("buildFilter() returned too few instructions: %d", len(instructions))
 	}
-	if instructions[0].code != BPF_LD|BPF_W|BPF_ABS || instructions[0].k != seccompDataArchOffset {
+	if instructions[0].Code != unix.BPF_LD|unix.BPF_W|unix.BPF_ABS || instructions[0].K != seccompDataArchOffset {
 		t.Fatalf("architecture load = %#v", instructions[0])
 	}
-	if instructions[1].code != BPF_JMP|BPF_JEQ|BPF_K || instructions[1].k != auditArchitecture || instructions[1].jt != 1 || instructions[1].jf != 0 {
+	if instructions[1].Code != unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K || instructions[1].K != auditArchitecture || instructions[1].Jt != 1 || instructions[1].Jf != 0 {
 		t.Fatalf("architecture guard = %#v", instructions[1])
 	}
-	if instructions[2].code != BPF_RET|BPF_K || instructions[2].k != SECCOMP_RET_KILL_PROCESS {
+	if instructions[2].Code != unix.BPF_RET|unix.BPF_K || instructions[2].K != unix.SECCOMP_RET_KILL_PROCESS {
 		t.Fatalf("architecture mismatch action = %#v", instructions[2])
 	}
 	if x32ABIBit != 0 {
 		found := false
 		for _, instruction := range instructions {
-			if instruction.code == BPF_JMP|BPF_JSET|BPF_K && instruction.k == x32ABIBit {
+			if instruction.Code == unix.BPF_JMP|unix.BPF_JSET|unix.BPF_K && instruction.K == x32ABIBit {
 				found = true
 			}
 		}
