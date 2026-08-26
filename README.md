@@ -13,7 +13,7 @@ cd sandbox/sandbox
 go build ./...
 go test ./...
 go vet ./...
-go run . -- --network-mode=none -- /bin/echo "hello world"
+go run . --network-mode=none -- /bin/echo "hello world"
 ```
 
 Use a temporary output path when a standalone executable is needed:
@@ -51,14 +51,17 @@ the CPU limit. If that controller is unavailable, configure
 `cpu_limit_percent: 0` or provide the required delegation.
 
 The default security policy drops `ALL` capabilities and uses a killing
-seccomp policy. Configuration names are validated before a child or bridge is
-created. Use `--config PATH` for YAML settings; public flags must precede the
-command, and `--` explicitly terminates the flag section.
+policy for blocked syscalls. Only `kill` and `trap` are accepted for that
+policy. Configuration names are validated before a child or bridge is
+created. Use one `command` list in YAML or positional CLI arguments; public
+flags must precede the command, and `--` explicitly terminates the flag
+section. Environment names must be valid shell variable names and duplicate
+keys are rejected.
 
 Storage uses `RLIMIT_FSIZE`, which is a per-file size limit rather than a
-total disk quota. The initial limit is applied as both the soft and hard
-ceiling. The historical maximum and expansion fields remain parse-compatible,
-but expansion policies are rejected.
+total disk quota. Set `file_size_limit_mb` or `--file-size-limit`; zero
+disables it. The limit is applied as both the soft and hard ceiling. Bind
+mounts are read-only unless `writable: true` is explicitly configured.
 
 ## Frozen Python demo
 

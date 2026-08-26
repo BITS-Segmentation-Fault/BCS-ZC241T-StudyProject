@@ -7,429 +7,124 @@ import (
 	"sandbox/sandbox/network"
 )
 
-func TestConfig_ValidationAndParity(t *testing.T) {
-	tests := []struct {
-		name        string
-		inputConfig Config
-		wantErr     bool
-		errContains string
-	}{
-		{
-			name: "Valid: minimal binary_path",
-			inputConfig: Config{
-				BinaryPath:           "/bin/echo",
-				SeccompDefaultAction: ActionKill,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr: false,
-		},
-		{
-			name: "Valid: command fallback",
-			inputConfig: Config{
-				Command:              []string{"echo", "hello"},
-				SeccompDefaultAction: ActionKill,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr: false,
-		},
-		{
-			name: "Valid: full featured config",
-			inputConfig: Config{
-				BinaryPath:           "/usr/bin/python",
-				Args:                 []string{"-m", "http.server"},
-				EnvVars:              []string{"PATH=/bin", "TERM=xterm"},
-				ReadOnlyRoot:         true,
-				SeccompDefaultAction: ActionTrap,
-				BlockedSyscalls:      []string{"mount", "reboot"},
-				DropCapabilities:     []string{"CAP_SYS_ADMIN", "CAP_NET_ADMIN"},
-				Storage: StorageConfig{
-					InitialLimitMB:    200,
-					AbsoluteMaximumMB: 1000,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				CPULimitPercent: 50,
-				MemoryLimitGB:   2,
-				MaxProcesses:    50,
-				NetworkMode:     network.None,
-				WorkingDir:      "/app",
-				RootFSSource:    "/custom/rootfs",
-				BindMounts:      []BindMount{{HostPath: "/data", ContainerPath: "/mnt/data", ReadOnly: true}},
-				DNSServers:      []string{"8.8.8.8", "1.1.1.1"},
-			},
-			wantErr: false,
-		},
-		{
-			name: "Valid: seccomp action allow",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionAllow,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.None,
-			},
-			wantErr: false,
-		},
-		{
-			name: "Valid: seccomp action log",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionLog,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.None,
-			},
-			wantErr: false,
-		},
-		{
-			name: "Valid: bridge mode with valid config",
-			inputConfig: Config{
-				BinaryPath:           "/bin/echo",
-				SeccompDefaultAction: ActionKill,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode:  network.Bridge,
-				BridgeConfig: network.DefaultBridgeConfig(),
-			},
-			wantErr: false,
-		},
-		{
-			name: "Error: bridge mode with empty bridge name",
-			inputConfig: Config{
-				BinaryPath:           "/bin/echo",
-				SeccompDefaultAction: ActionKill,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Bridge,
-				BridgeConfig: network.BridgeConfig{
-					BridgeName: "",
-					Subnet:     "10.0.0.0/24", GatewayIP: "10.0.0.1",
-					ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0",
-				},
-			},
-			wantErr:     true,
-			errContains: "bridge config: bridge_name cannot be empty",
-		},
-		{
-			name: "Error: no binary_path and no command",
-			inputConfig: Config{
-				SeccompDefaultAction: ActionKill,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "either binary_path or command must be provided",
-		},
-		{
-			name: "Error: invalid seccomp action",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: SeccompAction("bogus"),
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "invalid seccomp_default_action",
-		},
-		{
-			name: "Error: invalid network mode",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.NetworkMode("bad"),
-			},
-			wantErr:     true,
-			errContains: "invalid network mode",
-		},
-		{
-			name: "Error: empty command element",
-			inputConfig: Config{
-				Command:              []string{"ls", ""},
-				SeccompDefaultAction: ActionKill,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "is empty or only whitespace",
-		},
-		{
-			name: "Error: blocked_syscalls with empty entry",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				BlockedSyscalls:      []string{"mount", ""},
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "blocked_syscalls contains empty entry",
-		},
-		{
-			name: "Error: drop_capabilities with empty entry",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				DropCapabilities:     []string{"CAP_SYS_ADMIN", ""},
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "drop_capabilities contains empty entry",
-		},
-		{
-			name: "Error: cpu_limit_percent out of range (negative)",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				CPULimitPercent:      -1,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "cpu_limit_percent must be between 0 and 100",
-		},
-		{
-			name: "Error: cpu_limit_percent out of range (above 100)",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				CPULimitPercent:      101,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "cpu_limit_percent must be between 0 and 100",
-		},
-		{
-			name: "Error: memory_limit_gb negative",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				MemoryLimitGB:        -1,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "memory_limit_gb cannot be negative",
-		},
-		{
-			name: "Error: max_processes negative",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				MaxProcesses:         -1,
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "max_processes cannot be negative",
-		},
-		{
-			name: "Error: empty bind_mount host_path",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				BindMounts:           []BindMount{{HostPath: "", ContainerPath: "/mnt"}},
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "bind_mount host_path cannot be empty",
-		},
-		{
-			name: "Error: empty bind_mount container_path",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				BindMounts:           []BindMount{{HostPath: "/data", ContainerPath: ""}},
-				Storage: StorageConfig{
-					InitialLimitMB:    100,
-					AbsoluteMaximumMB: 500,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "bind_mount container_path cannot be empty",
-		},
-		{
-			name: "Error: storage initial > absolute",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				Storage: StorageConfig{
-					InitialLimitMB:    500,
-					AbsoluteMaximumMB: 100,
-					ExpansionPolicy:   "none",
-					IncrementStepMB:   0,
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "cannot cross absolute maximum boundary",
-		},
-		{
-			name: "Error: working directory escapes rootfs",
-			inputConfig: Config{
-				BinaryPath:           "/bin/ls",
-				SeccompDefaultAction: ActionKill,
-				WorkingDir:           "/work/../host",
-				Storage: StorageConfig{
-					InitialLimitMB: 100, AbsoluteMaximumMB: 500, ExpansionPolicy: "none",
-				},
-				NetworkMode: network.Host,
-			},
-			wantErr:     true,
-			errContains: "working_dir must be absolute",
-		},
-	}
+func validConfig() Config {
+	c := DefaultConfig()
+	c.Command = []string{"/bin/echo", ""}
+	return c
+}
 
+func TestDefaultConfig(t *testing.T) {
+	c := DefaultConfig()
+	if c.ReadOnlyRoot != true || c.BlockedSyscallAction != ActionKill || c.NetworkMode != network.None || c.WorkingDir != "/" {
+		t.Fatalf("unexpected security defaults: %+v", c)
+	}
+	if len(c.EnvVars) != 1 || c.EnvVars[0] != "PATH=/bin:/usr/bin" || c.CPULimitPercent != 100 || c.MemoryLimitGB != 1 || c.MaxProcesses != 100 || c.FileSizeLimitMB != 100 {
+		t.Fatalf("unexpected resource/environment defaults: %+v", c)
+	}
+	if c.RootFSSource != "/var/lib/sandbox/rootfs" || len(c.DropCapabilities) != 1 || c.DropCapabilities[0] != "ALL" {
+		t.Fatalf("unexpected rootfs/capability defaults: %+v", c)
+	}
+}
+
+func TestCommandValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		command []string
+		want    string
+	}{
+		{"missing", nil, "at least one"},
+		{"empty executable", []string{""}, "executable"},
+		{"whitespace executable", []string{"  "}, "executable"},
+		{"nul executable", []string{"echo\x00"}, "NUL"},
+		{"nul argument", []string{"echo", "a\x00b"}, "NUL"},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.inputConfig.Validate()
-
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			c := validConfig()
+			c.Command = tt.command
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() = %v, want %q", err, tt.want)
 			}
+		})
+	}
+	c := validConfig()
+	if err := c.Validate(); err != nil {
+		t.Fatalf("empty argument rejected: %v", err)
+	}
+}
 
-			if tt.wantErr && !strings.Contains(err.Error(), tt.errContains) {
-				t.Errorf("Validate() error msg = %q, expected to contain %q", err.Error(), tt.errContains)
+func TestValidatePolicies(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(*Config)
+		want   string
+	}{
+		{"unknown action", func(c *Config) { c.BlockedSyscallAction = "log" }, "blocked_syscall_action"},
+		{"unknown capability", func(c *Config) { c.DropCapabilities = []string{"CAP_NOPE"} }, "unknown capability"},
+		{"mixed all", func(c *Config) { c.DropCapabilities = []string{"ALL", "CAP_CHOWN"} }, "ALL"},
+		{"negative file size", func(c *Config) { c.FileSizeLimitMB = -1 }, "file_size_limit_mb"},
+		{"negative cpu", func(c *Config) { c.CPULimitPercent = -1 }, "cpu_limit_percent"},
+		{"cpu above maximum", func(c *Config) { c.CPULimitPercent = 101 }, "cpu_limit_percent"},
+		{"negative memory", func(c *Config) { c.MemoryLimitGB = -1 }, "memory_limit_gb"},
+		{"negative processes", func(c *Config) { c.MaxProcesses = -1 }, "max_processes"},
+		{"invalid DNS", func(c *Config) { c.DNSServers = []string{"not-an-ip"} }, "dns_servers"},
+		{"root bind", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/"}} }, "cannot be root"},
+		{"traversal", func(c *Config) { c.WorkingDir = "/a/../b" }, "cannot contain .."},
+		{"empty working directory", func(c *Config) { c.WorkingDir = "" }, "working_dir cannot be empty"},
+		{"relative bind source", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "tmp", ContainerPath: "/mnt"}} }, "bind_mount host_path"},
+		{"NUL bind source", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp\x00host", ContainerPath: "/mnt"}} }, "bind_mount host_path"},
+		{"host bind traversal", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp/../host", ContainerPath: "/mnt"}} }, "bind_mount host_path"},
+		{"relative bind target", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "mnt"}} }, "bind_mount container_path"},
+		{"NUL bind target", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/mnt\x00target"}} }, "bind_mount container_path"},
+		{"invalid bridge", func(c *Config) { c.NetworkMode = network.Bridge; c.BridgeConfig.MTU = 1 }, "bridge config"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := validConfig()
+			tt.change(&c)
+			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() = %v, want %q", err, tt.want)
 			}
 		})
 	}
 }
 
-func TestDefaultConfig(t *testing.T) {
-	cfg := DefaultConfig()
-
-	if cfg.ReadOnlyRoot != true {
-		t.Errorf("DefaultConfig().ReadOnlyRoot = false, want true")
+func TestValidateEnvironment(t *testing.T) {
+	for _, entry := range []string{"=x", "bad-name=x", "PATH", "A\x00=x"} {
+		c := validConfig()
+		c.EnvVars = []string{entry}
+		if err := c.Validate(); err == nil {
+			t.Errorf("Validate() accepted %q", entry)
+		}
 	}
-	if cfg.SeccompDefaultAction != ActionKill {
-		t.Errorf("DefaultConfig().SeccompDefaultAction = %q, want %q", cfg.SeccompDefaultAction, ActionKill)
+	c := validConfig()
+	c.EnvVars = []string{"A=1", "A=2"}
+	if err := c.Validate(); err == nil {
+		t.Error("duplicate environment key accepted")
 	}
-	if cfg.NetworkMode != network.None {
-		t.Errorf("DefaultConfig().NetworkMode = %q, want %q", cfg.NetworkMode, network.None)
-	}
-	if cfg.Storage.ExpansionPolicy != "none" {
-		t.Errorf("DefaultConfig().Storage.ExpansionPolicy = %q, want %q", cfg.Storage.ExpansionPolicy, "none")
-	}
-	if cfg.CPULimitPercent != 100 {
-		t.Errorf("DefaultConfig().CPULimitPercent = %d, want 100", cfg.CPULimitPercent)
-	}
-	if cfg.MemoryLimitGB != 1 {
-		t.Errorf("DefaultConfig().MemoryLimitGB = %d, want 1", cfg.MemoryLimitGB)
-	}
-	if cfg.MaxProcesses != 100 {
-		t.Errorf("DefaultConfig().MaxProcesses = %d, want 100", cfg.MaxProcesses)
-	}
-	if len(cfg.BlockedSyscalls) == 0 {
-		t.Errorf("DefaultConfig() should have blocked_syscalls")
-	}
-	if len(cfg.DropCapabilities) == 0 {
-		t.Errorf("DefaultConfig() should have drop_capabilities")
+	c = validConfig()
+	c.EnvWhitelist = []string{"A", "A"}
+	if err := c.Validate(); err == nil {
+		t.Error("duplicate whitelist key accepted")
 	}
 }
 
-func TestSeccompActionIsValid(t *testing.T) {
-	if !ActionKill.IsValid() {
-		t.Error("ActionKill.IsValid() = false")
+func TestEnvironmentMerge(t *testing.T) {
+	c := validConfig()
+	c.EnvVars = []string{"PATH=/custom", "A=explicit"}
+	c.EnvWhitelist = []string{"A", "B"}
+	got := c.Environment([]string{"PATH=/host", "A=host", "B=host", "C=secret"})
+	want := []string{"PATH=/custom", "A=explicit", "B=host"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("Environment() = %#v, want %#v", got, want)
 	}
-	if !ActionTrap.IsValid() {
-		t.Error("ActionTrap.IsValid() = false")
+}
+
+func TestCapabilityLookup(t *testing.T) {
+	if n, ok := CapabilityNumber("cap_net_admin"); !ok || n != 12 {
+		t.Fatalf("CapabilityNumber() = %d, %v", n, ok)
 	}
-	if !ActionLog.IsValid() {
-		t.Error("ActionLog.IsValid() = false")
-	}
-	if !ActionAllow.IsValid() {
-		t.Error("ActionAllow.IsValid() = false")
-	}
-	if SeccompAction("bogus").IsValid() {
-		t.Error("SeccompAction('bogus').IsValid() = true")
+	if !isKnownCapability(" all ") || isKnownCapability("CAP_UNKNOWN") {
+		t.Fatal("capability validation mismatch")
 	}
 }
