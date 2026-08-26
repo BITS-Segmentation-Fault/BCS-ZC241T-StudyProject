@@ -160,19 +160,27 @@ func removeTreeAt(parentFD int, name string) error {
 		}
 		return err
 	}
-	defer unix.Close(entry.fd)
 	if entry.stat.Mode&unix.S_IFMT == unix.S_IFDIR {
-		names, err := readDirectoryNames(entry.fd)
-		if err != nil {
-			return err
-		}
-		for _, child := range names {
-			if err := removeTreeAt(entry.fd, child); err != nil {
+		defer unix.Close(entry.fd)
+		for {
+			if _, err := unix.Seek(entry.fd, 0, 0); err != nil {
 				return err
 			}
+			names, readErr := readDirectoryBatch(entry.fd)
+			if readErr != nil {
+				return readErr
+			}
+			if len(names) == 0 {
+				return unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
+			}
+			for _, child := range names {
+				if err := removeTreeAt(entry.fd, child); err != nil {
+					return err
+				}
+			}
 		}
-		return unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
 	}
+	defer unix.Close(entry.fd)
 	return unix.Unlinkat(parentFD, name, 0)
 }
 

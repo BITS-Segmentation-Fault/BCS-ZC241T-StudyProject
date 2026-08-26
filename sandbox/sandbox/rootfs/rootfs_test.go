@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,6 +21,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type archiveEntry struct {
@@ -343,6 +346,39 @@ func TestHTTPSRedirectAllowsSameHostAndRejectsHostChanges(t *testing.T) {
 	}
 }
 
+func TestDefaultHTTPClientRedirectPolicy(t *testing.T) {
+	origin, err := url.Parse(testReleaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := defaultHTTPClientFor(origin)
+	tests := []struct {
+		name    string
+		target  string
+		prior   int
+		wantErr bool
+	}{
+		{name: "same origin", target: testReleaseURL, wantErr: false},
+		{name: "different host", target: "https://other.example/rootfs.tar.gz", wantErr: true},
+		{name: "different scheme", target: "http://dl-cdn.alpinelinux.org/rootfs.tar.gz", wantErr: true},
+		{name: "userinfo", target: "https://user@dl-cdn.alpinelinux.org/rootfs.tar.gz", wantErr: true},
+		{name: "too many hops", target: testReleaseURL, prior: 3, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			target, err := url.Parse(tt.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := make([]*http.Request, tt.prior)
+			err = client.CheckRedirect(&http.Request{URL: target}, previous)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("CheckRedirect() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestDownloadTimeout(t *testing.T) {
 	body := minimalArchive(t)
 	p := testProvisioner(t, body, http.StatusOK, nil)
@@ -499,6 +535,65 @@ func TestManifestValidationRejectsUnexpectedFields(t *testing.T) {
 	}
 	if err := validatePublishedRootfs(target, p.releases[runtime.GOARCH]); err == nil {
 		t.Fatal("validatePublishedRootfs() accepted unexpected manifest field")
+	}
+}
+
+func TestManifestValidationIsBounded(t *testing.T) {
+	body := minimalArchive(t)
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	target, err := p.Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, manifestName), bytes.Repeat([]byte("x"), maxManifestBytes+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validatePublishedRootfs(target, p.releases[runtime.GOARCH]); err == nil || !strings.Contains(err.Error(), "manifest exceeds") {
+		t.Fatalf("validatePublishedRootfs() error = %v, want bounded manifest error", err)
+	}
+}
+
+func TestTreeDigestEnforcesEntryLimit(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"one", "two"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fd, err := openDirectoryPath(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(fd)
+	limits := defaultExtractionLimits
+	limits.MaxEntries = 1
+	if _, err := treeDigestFDWithLimits(fd, limits); err == nil || !strings.Contains(err.Error(), "entry limit") {
+		t.Fatalf("treeDigestFDWithLimits() error = %v, want entry limit", err)
+	}
+}
+
+func TestRemoveTreeAtUsesBoundedBatches(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "tree")
+	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < cleanupDirectoryBatch*2+1; i++ {
+		name := filepath.Join(target, fmt.Sprintf("entry-%03d", i))
+		if err := os.WriteFile(name, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parentFD, err := openDirectoryPath(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(parentFD)
+	if err := removeTreeAt(parentFD, "tree"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(target); !os.IsNotExist(err) {
+		t.Fatalf("removeTreeAt() left tree: %v", err)
 	}
 }
 
