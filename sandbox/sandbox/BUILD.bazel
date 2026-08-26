@@ -208,21 +208,6 @@ go_test(
 )
 
 go_test(
-    name = "child_test",
-    srcs = glob(["child/*.go"]),
-    importpath = "sandbox/sandbox/child",
-    deps = [
-        ":common",
-        ":config",
-        ":fs",
-        ":network",
-        ":resources",
-        ":security",
-        "@org_golang_x_sys//unix:go_default_library",
-    ],
-)
-
-go_test(
     name = "resources_test",
     srcs = glob(["resources/*.go"]),
     importpath = "sandbox/sandbox/resources",
