@@ -12,9 +12,9 @@ import (
 	"strings"
 	"syscall"
 
-	"sandbox/sandbox/common"
 	"sandbox/sandbox/config"
 	"sandbox/sandbox/fs"
+	"sandbox/sandbox/internal/ipc"
 	"sandbox/sandbox/network"
 	"sandbox/sandbox/resources"
 	"sandbox/sandbox/security"
@@ -28,7 +28,7 @@ func childLog(msg string) {
 
 func Child(p2cRFd int) int {
 	readPipe := os.NewFile(uintptr(p2cRFd), "sandbox-config")
-	cfg, err := common.ReceiveConfig(readPipe)
+	cfg, err := ipc.ReadConfig(readPipe)
 	_ = readPipe.Close()
 	if err != nil {
 		childLog(fmt.Sprintf("CONFIGURATION FAILURE: %v", err))

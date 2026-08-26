@@ -3,9 +3,9 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 package(default_visibility = ["//sandbox:__subpackages__"])
 
 go_library(
-    name = "common",
-    srcs = ["common/common.go"],
-    importpath = "sandbox/sandbox/common",
+    name = "ipc",
+    srcs = ["internal/ipc/ipc.go"],
+    importpath = "sandbox/sandbox/internal/ipc",
     deps = [":config"],
 )
 
@@ -64,7 +64,7 @@ go_library(
     srcs = glob(["child/*.go"], exclude = ["child/*_test.go"]),
     importpath = "sandbox/sandbox/child",
     deps = [
-        ":common",
+        ":ipc",
         ":config",
         ":fs",
         ":network",
@@ -79,7 +79,7 @@ go_library(
     srcs = glob(["parent/*.go"], exclude = ["parent/*_test.go"]),
     importpath = "sandbox/sandbox/parent",
     deps = [
-        ":common",
+        ":ipc",
         ":config",
         ":network",
         ":resources",
@@ -93,7 +93,7 @@ go_binary(
     srcs = ["main.go", "args.go"],
     deps = [
         ":child",
-        ":common",
+        ":ipc",
         ":config",
         ":network",
         ":parent",
@@ -114,7 +114,7 @@ go_test(
     importpath = "sandbox/sandbox",
     deps = [
         ":child",
-        ":common",
+        ":ipc",
         ":config",
         ":network",
         ":parent",
@@ -134,9 +134,9 @@ go_test(
 )
 
 go_test(
-    name = "common_test",
-    srcs = glob(["common/*.go"]),
-    importpath = "sandbox/sandbox/common",
+    name = "ipc_test",
+    srcs = glob(["internal/ipc/*.go"]),
+    importpath = "sandbox/sandbox/internal/ipc",
     deps = [":config"],
 )
 
@@ -161,7 +161,7 @@ go_test(
     srcs = glob(["parent/*.go"]),
     importpath = "sandbox/sandbox/parent",
     deps = [
-        ":common",
+        ":ipc",
         ":config",
         ":network",
         ":resources",
@@ -206,7 +206,7 @@ go_test(
     importpath = "sandbox/sandbox",
     deps = [
         ":child",
-        ":common",
+        ":ipc",
         ":config",
         ":network",
         ":parent",
@@ -229,7 +229,7 @@ go_test(
     importpath = "sandbox/sandbox",
     deps = [
         ":child",
-        ":common",
+        ":ipc",
         ":config",
         ":network",
         ":parent",
@@ -251,7 +251,7 @@ go_test(
     importpath = "sandbox/sandbox",
     deps = [
         ":child",
-        ":common",
+        ":ipc",
         ":config",
         ":network",
         ":parent",

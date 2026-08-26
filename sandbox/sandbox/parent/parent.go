@@ -10,8 +10,8 @@ import (
 	"strings"
 	"syscall"
 
-	"sandbox/sandbox/common"
 	"sandbox/sandbox/config"
+	"sandbox/sandbox/internal/ipc"
 	"sandbox/sandbox/network"
 	"sandbox/sandbox/resources"
 	"sandbox/sandbox/rootfs"
@@ -124,7 +124,7 @@ func Parent(cfg config.Config) (result int) {
 		}
 	}
 
-	if err := common.SendConfig(p2cW, cfg); err != nil {
+	if err := ipc.WriteConfig(p2cW, cfg); err != nil {
 		log.Printf("[SANDBOX] configuration snapshot failed: %v", err)
 		return 1
 	}
