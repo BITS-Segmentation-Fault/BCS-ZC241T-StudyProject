@@ -6,6 +6,7 @@ go_library(
     name = "common",
     srcs = ["common/common.go"],
     importpath = "sandbox/sandbox/common",
+    deps = [":config"],
 )
 
 go_library(
@@ -98,6 +99,7 @@ go_library(
         ":config",
         ":network",
         ":resources",
+		":security",
     ],
 )
 
@@ -148,6 +150,13 @@ go_test(
 )
 
 go_test(
+    name = "common_test",
+    srcs = glob(["common/*.go"]),
+    importpath = "sandbox/sandbox/common",
+    deps = [":config"],
+)
+
+go_test(
     name = "fs_test",
     srcs = glob(["fs/*.go"]),
     importpath = "sandbox/sandbox/fs",
@@ -185,6 +194,7 @@ go_test(
         ":config",
         ":network",
         ":resources",
+		":security",
     ],
 )
 

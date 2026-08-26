@@ -11,7 +11,6 @@ import (
 	"syscall"
 
 	"sandbox/sandbox/common"
-	"sandbox/sandbox/config"
 	"sandbox/sandbox/fs"
 	"sandbox/sandbox/network"
 	"sandbox/sandbox/resources"
@@ -70,11 +69,26 @@ func childLog(msg string) {
 	_, _ = syscall.Write(1, []byte(fmt.Sprintf("[CHILD DEBUG] %s\n", msg)))
 }
 
-func Child(cfg config.Config, p2cRFd, c2pWFd int) int {
+func Child(p2cRFd, c2pWFd int) int {
 	childLog("Child process entered execution layer.")
 
 	if err := waitForParentSetup(p2cRFd, c2pWFd); err != nil {
 		childLog(fmt.Sprintf("PARENT HANDSHAKE FAILURE: %v", err))
+		return 1
+	}
+	readPipe := os.NewFile(uintptr(p2cRFd), "sandbox-config")
+	cfg, err := common.ReceiveConfig(readPipe)
+	_ = readPipe.Close()
+	if err != nil {
+		childLog(fmt.Sprintf("CONFIGURATION FAILURE: %v", err))
+		return 1
+	}
+	if err := cfg.Validate(); err != nil {
+		childLog(fmt.Sprintf("CONFIGURATION FAILURE: %v", err))
+		return 1
+	}
+	if err := security.ValidateSyscallNames(cfg.BlockedSyscalls); err != nil {
+		childLog(fmt.Sprintf("CONFIGURATION FAILURE: %v", err))
 		return 1
 	}
 
@@ -190,13 +204,6 @@ func waitForParentSetup(readFD, writeFD int) error {
 	}
 	if _, err := unix.Write(writeFD, []byte{common.ReadyByte}); err != nil {
 		return fmt.Errorf("send READY: %v", err)
-	}
-	ack := make([]byte, 1)
-	if _, err := unix.Read(readFD, ack); err != nil {
-		return fmt.Errorf("read ACK: %v", err)
-	}
-	if ack[0] != common.AckByte {
-		return fmt.Errorf("invalid ACK byte %q", ack[0])
 	}
 	return nil
 }
