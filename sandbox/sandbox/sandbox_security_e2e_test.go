@@ -152,6 +152,41 @@ func TestSandboxFilesystemPermissionMatrix(t *testing.T) {
 	if !strings.Contains(output, "write-ok") {
 		t.Fatalf("read-write bind rejected a write: %s", output)
 	}
+	data, err := os.ReadFile(hostFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "bound-data1" {
+		t.Fatalf("writable bind changed host file to %q, want bound-data1", data)
+	}
+}
+
+func TestSandboxDNSMountLeavesRootfsUnchanged(t *testing.T) {
+	namespacesAvailable(t)
+	rootfs := makeProbeRootfs(t, probeTestBinary(t))
+	const original = ""
+	if err := os.WriteFile(filepath.Join(rootfs, "etc", "resolv.conf"), []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultSecurityConfig()
+	cfg.dns = []string{"1.1.1.1"}
+	output, err := runSecurityProbe(t, rootfs, "host", []string{"--read=/etc/resolv.conf"}, cfg)
+	if err != nil {
+		if unsupportedSandboxOutput(output) {
+			skipOrFail(t, output)
+		}
+		t.Fatalf("DNS mount failed: %v\n%s", err, output)
+	}
+	if !strings.Contains(output, "read=nameserver 1.1.1.1") {
+		t.Fatalf("DNS contents were not mounted: %s", output)
+	}
+	data, err := os.ReadFile(filepath.Join(rootfs, "etc", "resolv.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Fatalf("source rootfs DNS file changed: %q", data)
+	}
 }
 
 func TestSandboxResourceLimits(t *testing.T) {
