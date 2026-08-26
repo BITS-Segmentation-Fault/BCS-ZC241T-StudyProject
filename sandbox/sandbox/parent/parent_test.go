@@ -3,42 +3,47 @@
 package parent
 
 import (
+	"os"
 	"os/exec"
 	"reflect"
+	"syscall"
 	"testing"
 
 	"sandbox/sandbox/config"
 )
 
-func TestWaitForChild_ReturnsChildExitCode(t *testing.T) {
-	cmd := exec.Command("/bin/sh", "-c", "exit 7")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start child: %v", err)
+func TestWaitForChild_ReturnsExitStatus(t *testing.T) {
+	tests := []struct {
+		name    string
+		command []string
+		want    int
+	}{
+		{name: "exit", command: []string{"/bin/sh", "-c", "exit 7"}, want: 7},
+		{name: "signal", command: []string{"/bin/sh", "-c", "kill -TERM $$"}, want: 143},
 	}
-
-	if got := waitForChild(cmd, nil, config.DefaultConfig()); got != 7 {
-		t.Fatalf("waitForChild() = %d, want 7", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command(tt.command[0], tt.command[1:]...)
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start child: %v", err)
+			}
+			if got := waitForChild(cmd, nil); got != tt.want {
+				t.Fatalf("waitForChild() = %d, want %d", got, tt.want)
+			}
+		})
 	}
 }
 
-func TestWaitForChild_ReturnsSuccess(t *testing.T) {
-	cmd := exec.Command("/bin/sh", "-c", "exit 0")
+func TestWaitForChild_ForwardsSignalsToProcessGroup(t *testing.T) {
+	cmd := exec.Command("/bin/sleep", "30")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start child: %v", err)
 	}
-
-	if got := waitForChild(cmd, nil, config.DefaultConfig()); got != 0 {
-		t.Fatalf("waitForChild() = %d, want 0", got)
-	}
-}
-
-func TestWaitForChild_ReturnsSignalStatus(t *testing.T) {
-	cmd := exec.Command("/bin/sh", "-c", "kill -TERM $$")
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start child: %v", err)
-	}
-	if got := waitForChild(cmd, nil, config.DefaultConfig()); got != 143 {
-		t.Fatalf("waitForChild() = %d, want 143", got)
+	signals := make(chan os.Signal, 1)
+	signals <- syscall.SIGTERM
+	if got := waitForChild(cmd, signals); got != 128+int(syscall.SIGTERM) {
+		t.Fatalf("waitForChild() = %d, want %d", got, 128+int(syscall.SIGTERM))
 	}
 }
 

@@ -18,7 +18,8 @@ import (
 	"sandbox/sandbox/security"
 )
 
-func Parent(cfg config.Config) int {
+func Parent(cfg config.Config) (result int) {
+	result = 1
 	if err := cfg.Validate(); err != nil {
 		log.Printf("[PRE-FLIGHT ERROR] invalid configuration: %v", err)
 		return 1
@@ -34,6 +35,10 @@ func Parent(cfg config.Config) int {
 		return 1
 	}
 	cfg.RootFSSource = resolvedRootFS
+	signals := make(chan os.Signal, 4)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer signal.Stop(signals)
+
 	resourceLimits, err := resources.PrepareResourceLimits(cfg.CPULimitPercent, cfg.MemoryLimitGB, cfg.MaxProcesses)
 	if err != nil {
 		log.Printf("[PRE-FLIGHT ERROR] resource limits cannot be provisioned: %v", err)
@@ -42,18 +47,27 @@ func Parent(cfg config.Config) int {
 	defer func() {
 		if err := resourceLimits.Cleanup(); err != nil {
 			log.Printf("[RESOURCE] cgroup cleanup failed: %v", err)
+			if result == 0 {
+				result = 1
+			}
 		}
 	}()
 	var bridgeState *network.BridgeState
 	if cfg.NetworkMode == network.Bridge {
-		var err error
 		bridgeState, err = network.SetupParentBridge(cfg.BridgeConfig)
 		if err != nil {
 			log.Printf("[NETWORK] Bridge setup failed: %v", err)
 			return 1
 		}
+		defer func() {
+			if err := network.TeardownParentBridge(bridgeState); err != nil {
+				log.Printf("[NETWORK] bridge cleanup failed: %v", err)
+				if result == 0 {
+					result = 1
+				}
+			}
+		}()
 		if err := network.SetupFirewallForBridge(bridgeState); err != nil {
-			cleanupBridge(bridgeState)
 			log.Printf("[NETWORK] firewall setup failed: %v", err)
 			return 1
 		}
@@ -61,9 +75,10 @@ func Parent(cfg config.Config) int {
 
 	p2cR, p2cW, err := os.Pipe()
 	if err != nil {
-		cleanupBridge(bridgeState)
+		log.Printf("[SANDBOX] configuration pipe creation failed: %v", err)
 		return 1
 	}
+	defer closeFiles(p2cR, p2cW)
 	cmd := exec.Command("/proc/self/exe", "--internal-child")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -85,54 +100,51 @@ func Parent(cfg config.Config) int {
 	}
 
 	if err := cmd.Start(); err != nil {
-		closeFiles(p2cR, p2cW)
-		cleanupBridge(bridgeState)
 		log.Printf("[PRE-FLIGHT ERROR] cannot start isolated child: %v", err)
 		return 1
 	}
 
 	closeFiles(p2cR)
+	childReaped := false
+	defer func() {
+		if !childReaped {
+			terminateChild(cmd)
+		}
+	}()
 
 	if err := resourceLimits.Attach(cmd.Process.Pid); err != nil {
-		terminateChild(cmd)
-		closeFiles(p2cW)
-		cleanupBridge(bridgeState)
-		log.Printf("[RESOURCE] CPU cgroup setup failed: %v", err)
+		log.Printf("[RESOURCE] aggregate resource attachment failed: %v", err)
 		return 1
 	}
 
 	if cfg.NetworkMode == network.Bridge {
 		if err := network.MoveVethToChild(bridgeState, cmd.Process.Pid); err != nil {
-			terminateChild(cmd)
-			closeFiles(p2cW)
-			cleanupBridge(bridgeState)
 			log.Printf("[NETWORK] moving veth failed: %v", err)
 			return 1
 		}
 	}
 
 	if err := common.SendConfig(p2cW, cfg); err != nil {
-		terminateChild(cmd)
-		closeFiles(p2cW)
-		cleanupBridge(bridgeState)
 		log.Printf("[SANDBOX] configuration snapshot failed: %v", err)
 		return 1
 	}
 	closeFiles(p2cW)
-	return waitForChild(cmd, bridgeState, cfg)
+	result = waitForChild(cmd, signals)
+	childReaped = true
+	return result
 }
 
-func waitForChild(cmd *exec.Cmd, state *network.BridgeState, cfg config.Config) int {
-	defer cleanupBridge(state)
-
-	signals := make(chan os.Signal, 4)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
-	defer signal.Stop(signals)
+func waitForChild(cmd *exec.Cmd, signals <-chan os.Signal) int {
 	done := make(chan struct{})
-	defer close(done)
-	go forwardSignals(cmd, signals, done)
+	forwarded := make(chan struct{})
+	go func() {
+		defer close(forwarded)
+		forwardSignals(cmd, signals, done)
+	}()
 
 	err := cmd.Wait()
+	close(done)
+	<-forwarded
 	if err == nil {
 		return 0
 	}
@@ -191,13 +203,4 @@ func internalChildEnvironment(environment []string) []string {
 		}
 	}
 	return []string{}
-}
-
-func cleanupBridge(state *network.BridgeState) {
-	if state == nil {
-		return
-	}
-	if err := network.TeardownParentBridge(state); err != nil {
-		log.Printf("[NETWORK] bridge cleanup failed: %v", err)
-	}
 }
