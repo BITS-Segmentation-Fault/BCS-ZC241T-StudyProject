@@ -17,6 +17,7 @@ test_suite(
         "//sandbox/sandbox:parent_test",
         "//sandbox/sandbox:child_test",
         "//sandbox/sandbox:resources_test",
+        "//sandbox/sandbox:rootfs_test",
         "//sandbox/sandbox:security_test",
         "//sandbox/sandbox:sandbox_integration_test",
         "//sandbox/sandbox:sandbox_e2e_test",
