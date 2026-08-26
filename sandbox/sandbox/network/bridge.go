@@ -3,61 +3,67 @@
 package network
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
 
-type realNetlinkOps struct{}
+type realNetlinkOps struct {
+	ipPath    string
+	writeFile func(string, []byte, os.FileMode) error
+}
 
-func runIPCmd(args ...string) error {
-	cmd := exec.Command("ip", args...)
+func runCommand(path string, args ...string) error {
+	cmd := exec.Command(path, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("ip %v failed: %w\n%s", args, err, string(out))
+		return fmt.Errorf("%s %v failed: %w\n%s", path, args, err, string(out))
 	}
 	return nil
 }
 
-func runIPOutput(args ...string) ([]byte, error) {
-	cmd := exec.Command("ip", args...)
+func runCommandOutput(path string, args ...string) ([]byte, error) {
+	cmd := exec.Command(path, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("ip %v failed: %w\n%s", args, err, string(out))
+		return nil, fmt.Errorf("%s %v failed: %w\n%s", path, args, err, string(out))
 	}
 	return out, nil
 }
 
 func (r *realNetlinkOps) BridgeAdd(name string) error {
-	return runIPCmd("link", "add", name, "type", "bridge")
+	return r.run("link", "add", name, "type", "bridge")
 }
-func (r *realNetlinkOps) BridgeDel(name string) error { return runIPCmd("link", "delete", name) }
+func (r *realNetlinkOps) BridgeDel(name string) error { return r.run("link", "delete", name) }
 func (r *realNetlinkOps) VethCreate(name, peer string) error {
-	return runIPCmd("link", "add", name, "type", "veth", "peer", "name", peer)
+	return r.run("link", "add", name, "type", "veth", "peer", "name", peer)
 }
-func (r *realNetlinkOps) VethDelete(name string) error { return runIPCmd("link", "delete", name) }
+func (r *realNetlinkOps) VethDelete(name string) error { return r.run("link", "delete", name) }
 func (r *realNetlinkOps) LinkSetMaster(link, master string) error {
-	return runIPCmd("link", "set", link, "master", master)
+	return r.run("link", "set", link, "master", master)
 }
-func (r *realNetlinkOps) LinkSetUp(name string) error { return runIPCmd("link", "set", name, "up") }
+func (r *realNetlinkOps) LinkSetUp(name string) error { return r.run("link", "set", name, "up") }
 func (r *realNetlinkOps) LinkSetMTU(name string, mtu int) error {
-	return runIPCmd("link", "set", name, "mtu", strconv.Itoa(mtu))
+	return r.run("link", "set", name, "mtu", strconv.Itoa(mtu))
 }
 func (r *realNetlinkOps) LinkSetMAC(name string, addr []byte) error {
-	return runIPCmd("link", "set", name, "address", net.HardwareAddr(addr).String())
+	return r.run("link", "set", name, "address", net.HardwareAddr(addr).String())
 }
 func (r *realNetlinkOps) LinkSetName(oldName, newName string) error {
-	return runIPCmd("link", "set", oldName, "name", newName)
+	return r.run("link", "set", oldName, "name", newName)
 }
 func (r *realNetlinkOps) AddrAdd(iface, ip string) error {
-	return runIPCmd("addr", "add", ip, "dev", iface)
+	return r.run("addr", "add", ip, "dev", iface)
 }
 func (r *realNetlinkOps) LinkNames() ([]string, error) {
-	out, err := runIPOutput("-o", "link", "show")
+	out, err := runCommandOutput(r.ipPath, "-o", "link", "show")
 	if err != nil {
 		return nil, err
 	}
@@ -75,8 +81,72 @@ func (r *realNetlinkOps) LinkNames() ([]string, error) {
 	return names, nil
 }
 
+func (r *realNetlinkOps) run(args ...string) error { return runCommand(r.ipPath, args...) }
+
+func (r *realNetlinkOps) DisableIPv6() error {
+	writeFile := r.writeFile
+	if writeFile == nil {
+		writeFile = os.WriteFile
+	}
+	if err := writeFile("/proc/sys/net/ipv6/conf/all/disable_ipv6", []byte("1\n"), 0644); err != nil {
+		return err
+	}
+	return writeFile("/proc/sys/net/ipv6/conf/default/disable_ipv6", []byte("1\n"), 0644)
+}
+
+func routePrefixes(path string) ([]routeInfo, error) {
+	output, err := runCommandOutput(path, "-j", "-4", "route", "show", "table", "all")
+	if err != nil {
+		return nil, err
+	}
+	var entries []struct {
+		Destination string `json:"dst"`
+		Device      string `json:"dev"`
+	}
+	if err := json.Unmarshal(output, &entries); err != nil {
+		return nil, fmt.Errorf("parse ip route JSON: %w", err)
+	}
+	var routes []routeInfo
+	for _, entry := range entries {
+		if entry.Destination == "default" {
+			continue
+		}
+		if entry.Destination == "" {
+			return nil, fmt.Errorf("route entry has no destination")
+		}
+		value := entry.Destination
+		if !strings.Contains(value, "/") {
+			value += "/32"
+		}
+		prefix, err := netip.ParsePrefix(value)
+		if err != nil || !prefix.Addr().Is4() {
+			return nil, fmt.Errorf("invalid IPv4 route destination %q", entry.Destination)
+		}
+		routes = append(routes, routeInfo{prefix: prefix, device: entry.Device})
+	}
+	return routes, nil
+}
+
 func defaultOperations() operations {
-	return operations{netlink: &realNetlinkOps{}, runIP: runIPCmd, firewall: &realFirewallOps{}}
+	ipPath, _ := resolveTrustedTool("ip")
+	iptablesPath, _ := resolveTrustedTool("iptables")
+	return operations{
+		netlink:   &realNetlinkOps{ipPath: ipPath, writeFile: os.WriteFile},
+		runIP:     func(args ...string) error { return runCommand(ipPath, args...) },
+		routeList: func() ([]routeInfo, error) { return routePrefixes(ipPath) },
+		firewall:  &realFirewallOps{path: iptablesPath},
+	}
+}
+
+func resolveTrustedTool(name string) (string, error) {
+	for _, dir := range []string{"/usr/sbin", "/usr/bin", "/sbin", "/bin"} {
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err == nil && info.Mode().IsRegular() && info.Mode()&0111 != 0 {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("trusted %s executable was not found", name)
 }
 
 func newBridgeManager(ops operations) *bridgeManager {
@@ -86,6 +156,9 @@ func newBridgeManager(ops operations) *bridgeManager {
 	}
 	if ops.runIP == nil {
 		ops.runIP = defaults.runIP
+	}
+	if ops.routeList == nil {
+		ops.routeList = defaults.routeList
 	}
 	if ops.firewall == nil {
 		ops.firewall = defaults.firewall
@@ -97,7 +170,22 @@ func (m *bridgeManager) setupParentBridge(cfg BridgeConfig) (*BridgeState, error
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("bridge config validation failed: %w", err)
 	}
-	bridge, hostVeth, nsVeth := resourceNames()
+	if m.ops.routeList != nil {
+		routes, err := m.ops.routeList()
+		if err != nil {
+			return nil, fmt.Errorf("inspect IPv4 routes before bridge setup: %w", err)
+		}
+		prefix, _ := netip.ParsePrefix(cfg.Subnet)
+		for _, route := range routes {
+			if route.prefix.Overlaps(prefix) {
+				return nil, fmt.Errorf("bridge subnet %q overlaps existing route %q on %s", cfg.Subnet, route.prefix, route.device)
+			}
+		}
+	}
+	bridge, hostVeth, nsVeth, err := resourceNames(nil)
+	if err != nil {
+		return nil, err
+	}
 	state := &BridgeState{config: cfg, manager: m, bridge: bridge, hostVeth: hostVeth, nsVeth: nsVeth}
 	if err := m.ops.netlink.BridgeAdd(bridge); err != nil {
 		return nil, fmt.Errorf("failed to create bridge %q: %w", bridge, err)
@@ -110,9 +198,28 @@ func (m *bridgeManager) setupParentBridge(cfg BridgeConfig) (*BridgeState, error
 	if err := m.ops.netlink.LinkSetMaster(hostVeth, bridge); err != nil {
 		return nil, setupFailure(fmt.Errorf("failed to attach veth to bridge: %w", err), state)
 	}
-	prefix, _ := netipPrefix(cfg.Subnet)
-	if err := m.ops.netlink.AddrAdd(bridge, cfg.GatewayIP+"/"+strconv.Itoa(prefix)); err != nil {
+	prefixBits, _ := netipPrefix(cfg.Subnet)
+	configuredPrefix, _ := netip.ParsePrefix(cfg.Subnet)
+	if err := m.ops.netlink.AddrAdd(bridge, cfg.GatewayIP+"/"+strconv.Itoa(prefixBits)); err != nil {
 		return nil, setupFailure(fmt.Errorf("failed to assign bridge IP: %w", err), state)
+	}
+	if m.ops.routeList != nil {
+		routes, err := m.ops.routeList()
+		if err != nil {
+			return nil, setupFailure(fmt.Errorf("inspect IPv4 routes after bridge address assignment: %w", err), state)
+		}
+		connected := false
+		for _, route := range routes {
+			if route.prefix == configuredPrefix && route.device == bridge {
+				connected = true
+			}
+			if route.prefix.Overlaps(configuredPrefix) && route.device != bridge {
+				return nil, setupFailure(fmt.Errorf("bridge subnet %q overlaps route %q on %s after address assignment", cfg.Subnet, route.prefix, route.device), state)
+			}
+		}
+		if !connected {
+			return nil, setupFailure(fmt.Errorf("connected route %q is missing on bridge %q after address assignment", configuredPrefix, bridge), state)
+		}
 	}
 	if err := m.ops.netlink.LinkSetMTU(bridge, cfg.MTU); err != nil {
 		return nil, setupFailure(fmt.Errorf("failed to set bridge MTU: %w", err), state)
@@ -137,6 +244,9 @@ func (m *bridgeManager) moveVethToChild(state *BridgeState, pid int) error {
 }
 
 func (m *bridgeManager) configureChildIface(cfg BridgeConfig) error {
+	if err := m.ops.netlink.DisableIPv6(); err != nil {
+		return fmt.Errorf("disable IPv6: %w", err)
+	}
 	names, err := m.ops.netlink.LinkNames()
 	if err != nil {
 		return fmt.Errorf("enumerate child interfaces: %w", err)
@@ -190,6 +300,11 @@ func (state *BridgeState) cleanup() error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	var errs []error
+	if len(state.firewall) != 0 {
+		if err := removeFirewallRulesLocked(state, state.manager.ops.firewall); err != nil {
+			errs = append(errs, fmt.Errorf("remove firewall rules: %w", err))
+		}
+	}
 	if state.ownedVeth {
 		if err := state.manager.ops.netlink.VethDelete(state.hostVeth); err != nil {
 			errs = append(errs, fmt.Errorf("delete veth %q: %w", state.hostVeth, err))
@@ -237,21 +352,31 @@ func TeardownParentBridge(state *BridgeState) error {
 	if state == nil {
 		return nil
 	}
-	return errors.Join(teardownNATState(state.nat), state.manager.teardownParentBridge(state))
+	return state.cleanup()
 }
 
 func CheckBridgePrerequisites() error {
-	if !hasNetAdminCapability() {
+	if !bridgeCapabilityCheck() {
 		return fmt.Errorf("bridge mode requires effective CAP_NET_ADMIN for host link and NAT operations")
 	}
-	if _, err := exec.LookPath("ip"); err != nil {
-		return fmt.Errorf("bridge mode requires the ip command: %w", err)
+	for _, tool := range []string{"ip", "iptables"} {
+		if _, err := bridgeToolResolver(tool); err != nil {
+			return fmt.Errorf("bridge mode requires trusted %s: %w", tool, err)
+		}
 	}
-	if _, err := exec.LookPath("iptables"); err != nil {
-		return fmt.Errorf("bridge mode requires iptables: %w", err)
+	forwarding, err := bridgeReadFile("/proc/sys/net/ipv4/ip_forward")
+	if err != nil {
+		return fmt.Errorf("bridge mode cannot read IPv4 forwarding state: %w", err)
+	}
+	if strings.TrimSpace(string(forwarding)) != "1" {
+		return fmt.Errorf("bridge mode requires IPv4 forwarding to be enabled")
 	}
 	return nil
 }
+
+var bridgeCapabilityCheck = hasNetAdminCapability
+var bridgeToolResolver = resolveTrustedTool
+var bridgeReadFile = os.ReadFile
 
 func hasNetAdminCapability() bool {
 	data, err := os.ReadFile("/proc/self/status")

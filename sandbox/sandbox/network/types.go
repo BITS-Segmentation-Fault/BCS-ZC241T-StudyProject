@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/netip"
-	"strings"
 	"sync"
 )
 
@@ -69,19 +68,24 @@ type netlinkOps interface {
 	LinkSetName(oldName, newName string) error
 	AddrAdd(iface, ip string) error
 	LinkNames() ([]string, error)
+	DisableIPv6() error
 }
 
 type firewallOps interface {
-	AddNAT(subnet, bridge, label string) error
-	DeleteNAT(subnet, bridge, label string) error
-	AddMetadataBlock(destination, label string) error
-	DeleteMetadataBlock(destination, label string) error
+	Add(rule []string) error
+	Delete(rule []string) error
 }
 
 type operations struct {
-	netlink  netlinkOps
-	runIP    func(args ...string) error
-	firewall firewallOps
+	netlink   netlinkOps
+	runIP     func(args ...string) error
+	routeList func() ([]routeInfo, error)
+	firewall  firewallOps
+}
+
+type routeInfo struct {
+	prefix netip.Prefix
+	device string
 }
 
 type bridgeManager struct {
@@ -92,7 +96,7 @@ type bridgeManager struct {
 type BridgeState struct {
 	config      BridgeConfig
 	manager     *bridgeManager
-	nat         *natState
+	firewall    []firewallRule
 	bridge      string
 	hostVeth    string
 	nsVeth      string
@@ -101,19 +105,7 @@ type BridgeState struct {
 	ownedVeth   bool
 }
 
-type natState struct {
-	config   BridgeConfig
-	manager  *bridgeManager
-	bridge   string
-	label    string
-	metadata []string
-	mu       sync.Mutex
-	natOwned bool
-}
-
-func validateInterfaceName(value string) error {
-	if value == "" || len(value) >= 16 || strings.IndexByte(value, 0) >= 0 || strings.ContainsAny(value, "/ \t\n") {
-		return fmt.Errorf("invalid interface name %q", value)
-	}
-	return nil
+type firewallRule struct {
+	add []string
+	del []string
 }

@@ -63,22 +63,22 @@ func Parent(cfg config.Config) int {
 			log.Printf("[NETWORK] Bridge setup failed: %v", err)
 			return 1
 		}
-		if err := network.SetupNATForBridge(bridgeState); err != nil {
-			cleanupBridge(bridgeState, cfg)
-			log.Printf("[NETWORK] NAT setup failed: %v", err)
+		if err := network.SetupFirewallForBridge(bridgeState); err != nil {
+			cleanupBridge(bridgeState)
+			log.Printf("[NETWORK] firewall setup failed: %v", err)
 			return 1
 		}
 	}
 
 	p2cR, p2cW, err := os.Pipe()
 	if err != nil {
-		cleanupBridge(bridgeState, cfg)
+		cleanupBridge(bridgeState)
 		return 1
 	}
 	c2pR, c2pW, err := os.Pipe()
 	if err != nil {
 		closeFiles(p2cR, p2cW)
-		cleanupBridge(bridgeState, cfg)
+		cleanupBridge(bridgeState)
 		return 1
 	}
 
@@ -104,7 +104,7 @@ func Parent(cfg config.Config) int {
 
 	if err := cmd.Start(); err != nil {
 		closeFiles(p2cR, p2cW, c2pR, c2pW)
-		cleanupBridge(bridgeState, cfg)
+		cleanupBridge(bridgeState)
 		log.Printf("[PRE-FLIGHT ERROR] cannot start isolated child: %v", err)
 		return 1
 	}
@@ -114,7 +114,7 @@ func Parent(cfg config.Config) int {
 	if err := waitForReady(c2pR); err != nil {
 		terminateChild(cmd)
 		closeFiles(p2cW, c2pR)
-		cleanupBridge(bridgeState, cfg)
+		cleanupBridge(bridgeState)
 		log.Printf("[SANDBOX] child readiness failed: %v", err)
 		return 1
 	}
@@ -122,7 +122,7 @@ func Parent(cfg config.Config) int {
 	if err := resourceLimits.Attach(cmd.Process.Pid); err != nil {
 		terminateChild(cmd)
 		closeFiles(p2cW, c2pR)
-		cleanupBridge(bridgeState, cfg)
+		cleanupBridge(bridgeState)
 		log.Printf("[RESOURCE] CPU cgroup setup failed: %v", err)
 		return 1
 	}
@@ -131,7 +131,7 @@ func Parent(cfg config.Config) int {
 		if err := network.MoveVethToChild(bridgeState, cmd.Process.Pid); err != nil {
 			terminateChild(cmd)
 			closeFiles(p2cW, c2pR)
-			cleanupBridge(bridgeState, cfg)
+			cleanupBridge(bridgeState)
 			log.Printf("[NETWORK] moving veth failed: %v", err)
 			return 1
 		}
@@ -140,7 +140,7 @@ func Parent(cfg config.Config) int {
 	if err := common.SendConfig(p2cW, cfg); err != nil {
 		terminateChild(cmd)
 		closeFiles(p2cW, c2pR)
-		cleanupBridge(bridgeState, cfg)
+		cleanupBridge(bridgeState)
 		log.Printf("[SANDBOX] configuration snapshot failed: %v", err)
 		return 1
 	}
@@ -164,7 +164,7 @@ func waitForReady(file *os.File) error {
 }
 
 func waitForChild(cmd *exec.Cmd, state *network.BridgeState, cfg config.Config) int {
-	defer cleanupBridge(state, cfg)
+	defer cleanupBridge(state)
 
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
@@ -238,7 +238,7 @@ func runtimeEnvironment(environment []string) []string {
 	return updated
 }
 
-func cleanupBridge(state *network.BridgeState, cfg config.Config) {
+func cleanupBridge(state *network.BridgeState) {
 	if state == nil {
 		return
 	}

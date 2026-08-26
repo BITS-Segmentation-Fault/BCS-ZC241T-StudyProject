@@ -1,8 +1,10 @@
 package network
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
-	"os"
+	"io"
 	"sync/atomic"
 )
 
@@ -29,7 +31,14 @@ func DefaultBridgeConfig() BridgeConfig {
 	}
 }
 
-func resourceNames() (bridge, hostVeth, nsVeth string) {
-	suffix := fmt.Sprintf("%x%x", uint32(os.Getpid())&0xffff, runCounter.Add(1)&0xff)
-	return "sb" + suffix, "vh" + suffix, "vc" + suffix
+func resourceNames(r io.Reader) (bridge, hostVeth, nsVeth string, err error) {
+	if r == nil {
+		r = rand.Reader
+	}
+	var random [6]byte
+	if _, err := io.ReadFull(r, random[:]); err != nil {
+		return "", "", "", fmt.Errorf("generate bridge resource names: %w", err)
+	}
+	suffix := hex.EncodeToString(random[:])
+	return "sb" + suffix, "vh" + suffix, "vc" + suffix, nil
 }

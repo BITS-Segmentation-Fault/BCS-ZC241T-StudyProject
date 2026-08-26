@@ -88,8 +88,9 @@ by the sandbox. The rootfs must already contain `/proc`, and must already
 contain `/etc/resolv.conf` when DNS servers are configured. Every bind target
 must also exist and match the source type; setup never creates target paths.
 
-Bridge mode additionally requires root or `CAP_NET_ADMIN`, the `ip` command,
-and `iptables`. It creates uniquely named links and owned NAT rules and rolls
+Bridge mode additionally requires effective `CAP_NET_ADMIN`, trusted `ip` and
+`iptables` commands, and enabled IPv4 forwarding. It creates uniquely named
+links and owned firewall rules and rolls
 back only resources created by that run. CPU limits from 1 through 100 require
 a delegated CPU controller in a writable cgroup-v2 hierarchy; `0` disables
 the CPU limit. If that controller is unavailable, configure
