@@ -102,7 +102,7 @@ func Child(p2cRFd, c2pWFd int) int {
 	}
 
 	childLog(fmt.Sprintf("Handing off to %q", binaryPath))
-	return runInit(binaryPath, execArgs, cfg.Environment(os.Environ()))
+	return runInit(binaryPath, execArgs, append([]string(nil), cfg.EnvVars...))
 }
 
 // runInit keeps the payload in the namespace init process group. The parent

@@ -54,6 +54,52 @@ func TestSandboxRootlessHostAndNone(t *testing.T) {
 	}
 }
 
+func TestSandboxInternalEnvironmentDoesNotLeakHostValues(t *testing.T) {
+	namespacesAvailable(t)
+	sandbox := sandboxTestBinary(t)
+	probe := probeTestBinary(t)
+	rootfs := makeProbeRootfs(t, probe)
+	configPath := filepath.Join(t.TempDir(), "sandbox.yaml")
+	contents := fmt.Sprintf(`command: [/bin/probe, "--read=/proc/1/environ"]
+env_vars: []
+env_whitelist: [PROBE_VALUE]
+read_only_root: false
+blocked_syscall_action: kill
+blocked_syscalls: []
+drop_capabilities: []
+file_size_limit_mb: 0
+memory_limit_gb: 0
+max_processes: 0
+network_mode: host
+working_dir: /work
+rootfs_source: %q
+`, rootfs)
+	if err := os.WriteFile(configPath, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(sandbox, "--config", configPath)
+	command.Env = withEnvironment(os.Environ(), "PROBE_VALUE", "allowed-value")
+	command.Env = withEnvironment(command.Env, "SANDBOX_PARENT_SECRET", "must-not-leak")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		if unsupportedSandboxOutput(string(output)) {
+			skipOrFail(t, string(output))
+		}
+		t.Fatalf("environment isolation failed: %v\n%s", err, output)
+	}
+	text := string(output)
+	if !strings.Contains(text, "env=allowed-value") {
+		t.Fatalf("payload did not receive whitelisted value: %s", text)
+	}
+	pidEnvironment := findLine(text, "read=")
+	if pidEnvironment == "" {
+		t.Fatalf("payload did not read /proc/1/environ: %s", text)
+	}
+	if strings.Contains(pidEnvironment, "SANDBOX_PARENT_SECRET=must-not-leak") || strings.Contains(pidEnvironment, "PROBE_VALUE=allowed-value") {
+		t.Fatalf("internal child environment leaked payload/host values: %s", pidEnvironment)
+	}
+}
+
 func TestSandboxPreservesExitAndSignalStatus(t *testing.T) {
 	namespacesAvailable(t)
 	sandbox := sandboxTestBinary(t)

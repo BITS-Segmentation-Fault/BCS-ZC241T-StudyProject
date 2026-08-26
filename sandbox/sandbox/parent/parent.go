@@ -31,6 +31,7 @@ func Parent(cfg config.Config) int {
 		log.Printf("[PRE-FLIGHT ERROR] invalid syscall policy: %v", err)
 		return 1
 	}
+	cfg = snapshotEnvironment(cfg, os.Environ())
 	resolvedRootFS, err := (rootfs.Provisioner{}).Resolve(cfg.RootFSSource)
 	if err != nil {
 		log.Printf("[PRE-FLIGHT ERROR] rootfs cannot be provisioned: %v", err)
@@ -86,7 +87,7 @@ func Parent(cfg config.Config) int {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = runtimeEnvironment(os.Environ())
+	cmd.Env = internalChildEnvironment(cfg.EnvVars)
 	cmd.ExtraFiles = []*os.File{p2cR, c2pW}
 
 	cloneFlags := uintptr(syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWUTS)
@@ -218,24 +219,20 @@ func closeFiles(files ...*os.File) {
 	}
 }
 
-func runtimeEnvironment(environment []string) []string {
-	const key = "GODEBUG="
-	updated := make([]string, 0, len(environment)+1)
-	found := false
+func snapshotEnvironment(cfg config.Config, hostEnvironment []string) config.Config {
+	cfg.EnvVars = cfg.Environment(hostEnvironment)
+	cfg.EnvWhitelist = nil
+	return cfg
+}
+
+func internalChildEnvironment(environment []string) []string {
 	for _, entry := range environment {
-		if strings.HasPrefix(entry, key) {
-			if !found {
-				updated = append(updated, key+"pidfd=0")
-				found = true
-			}
-			continue
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && key == "PATH" {
+			return []string{entry}
 		}
-		updated = append(updated, entry)
 	}
-	if !found {
-		updated = append(updated, key+"pidfd=0")
-	}
-	return updated
+	return []string{}
 }
 
 func cleanupBridge(state *network.BridgeState) {
