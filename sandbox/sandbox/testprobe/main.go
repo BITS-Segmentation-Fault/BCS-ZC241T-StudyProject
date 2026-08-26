@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ func main() {
 	fmt.Printf("uid_map=%s\n", normalizedProcFile("/proc/self/uid_map"))
 	fmt.Printf("gid_map=%s\n", normalizedProcFile("/proc/self/gid_map"))
 	fmt.Printf("setgroups=%s\n", normalizedProcFile("/proc/self/setgroups"))
+	printNetworkState()
 	for _, arg := range os.Args[1:] {
 		if strings.HasPrefix(arg, "--exit=") {
 			code, _ := strconv.Atoi(strings.TrimPrefix(arg, "--exit="))
@@ -61,6 +63,62 @@ func main() {
 			probeProcesses(strings.TrimPrefix(arg, "--spawn-processes="))
 		}
 	}
+}
+
+func printNetworkState() {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		fmt.Printf("interfaces-error=%v\n", err)
+		return
+	}
+	var names []string
+	for _, iface := range interfaces {
+		names = append(names, iface.Name)
+	}
+	sort.Strings(names)
+	fmt.Printf("interfaces=%s\n", strings.Join(names, ","))
+	for _, iface := range interfaces {
+		addrs, err := iface.Addrs()
+		if err != nil {
+			fmt.Printf("ipv4-error=%s:%v\n", iface.Name, err)
+			continue
+		}
+		for _, addr := range addrs {
+			ipnet, ok := addr.(*net.IPNet)
+			if ok && ipnet.IP.To4() != nil {
+				fmt.Printf("ipv4=%s=%s\n", iface.Name, ipnet.String())
+			}
+		}
+		fmt.Printf("mtu=%s=%d\n", iface.Name, iface.MTU)
+		if iface.Name == "lo" {
+			fmt.Printf("loopback=%s\n", map[bool]string{true: "up", false: "down"}[iface.Flags&net.FlagUp != 0])
+		}
+	}
+	defaultRoute := "none"
+	if data, err := os.ReadFile("/proc/net/route"); err == nil {
+		for _, line := range strings.Split(string(data), "\n")[1:] {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[1] == "00000000" {
+				gateway, parseErr := strconv.ParseUint(fields[2], 16, 32)
+				if parseErr == nil {
+					value := uint32(gateway)
+					defaultRoute = net.IPv4(byte(value), byte(value>>8), byte(value>>16), byte(value>>24)).String()
+				}
+				break
+			}
+		}
+	}
+	fmt.Printf("default-route=%s\n", defaultRoute)
+	ipv6 := false
+	for _, iface := range interfaces {
+		addrs, _ := iface.Addrs()
+		for _, addr := range addrs {
+			if parsed, _, err := net.ParseCIDR(addr.String()); err == nil && parsed.To4() == nil && !parsed.IsLoopback() {
+				ipv6 = true
+			}
+		}
+	}
+	fmt.Printf("ipv6=%s\n", map[bool]string{true: "present", false: "none"}[ipv6])
 }
 
 func normalizedProcFile(path string) string {
