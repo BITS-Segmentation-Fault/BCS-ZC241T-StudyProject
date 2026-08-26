@@ -68,7 +68,24 @@ func TestValidatePolicies(t *testing.T) {
 		{"negative memory", func(c *Config) { c.MemoryLimitGB = -1 }, "memory_limit_gb"},
 		{"negative processes", func(c *Config) { c.MaxProcesses = -1 }, "max_processes"},
 		{"invalid DNS", func(c *Config) { c.DNSServers = []string{"not-an-ip"} }, "dns_servers"},
+		{"managed root writable", func(c *Config) { c.ReadOnlyRoot = false }, "managed rootfs"},
 		{"root bind", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/"}} }, "cannot be root"},
+		{"duplicate bind target", func(c *Config) {
+			c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/mnt/x"}, {HostPath: "/var", ContainerPath: "/mnt//x"}}
+		}, "duplicate"},
+		{"overlapping bind target", func(c *Config) {
+			c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/mnt"}, {HostPath: "/var", ContainerPath: "/mnt/sub"}}
+		}, "overlapping"},
+		{"proc bind target", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/proc/log"}} }, "reserved for proc"},
+		{"DNS bind target", func(c *Config) {
+			c.DNSServers = []string{"1.1.1.1"}
+			c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/etc/resolv.conf"}}
+		}, "conflicts"},
+		{"near proc bind target", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/processor"}} }, ""},
+		{"near DNS bind target", func(c *Config) {
+			c.DNSServers = []string{"1.1.1.1"}
+			c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/etc/resolv.conf.d"}}
+		}, ""},
 		{"traversal", func(c *Config) { c.WorkingDir = "/a/../b" }, "cannot contain .."},
 		{"empty working directory", func(c *Config) { c.WorkingDir = "" }, "working_dir cannot be empty"},
 		{"relative bind source", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "tmp", ContainerPath: "/mnt"}} }, "bind_mount host_path"},
@@ -82,8 +99,12 @@ func TestValidatePolicies(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			c := validConfig()
 			tt.change(&c)
-			if err := c.Validate(); err == nil || !strings.Contains(err.Error(), tt.want) {
+			err := c.Validate()
+			if tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
 				t.Fatalf("Validate() = %v, want %q", err, tt.want)
+			}
+			if tt.want == "" && err != nil {
+				t.Fatalf("Validate() = %v, want valid configuration", err)
 			}
 		})
 	}
