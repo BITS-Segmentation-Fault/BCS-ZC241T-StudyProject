@@ -4,18 +4,16 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
-	"net"
 )
 
-func GenerateRandomMAC(r io.Reader) (net.HardwareAddr, error) {
+func generateRandomMAC(r io.Reader) ([]byte, error) {
 	if r == nil {
 		r = rand.Reader
 	}
-	buf := make([]byte, 5)
-	_, err := io.ReadFull(r, buf)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read random bytes: %v", err)
+	mac := make([]byte, 6)
+	if _, err := io.ReadFull(r, mac); err != nil {
+		return nil, fmt.Errorf("failed to read random bytes: %w", err)
 	}
-	mac := append([]byte{0x02}, buf...)
-	return net.HardwareAddr(mac), nil
+	mac[0] = (mac[0] | 2) &^ 1
+	return mac, nil
 }

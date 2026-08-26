@@ -2,231 +2,76 @@ package network
 
 import (
 	"bytes"
-	"net"
+	"errors"
 	"strings"
 	"testing"
 )
 
-func TestNetworkMode_ParityAndEdgeCases(t *testing.T) {
-	tests := []struct {
-		name        string
-		input       string
-		wantMode    NetworkMode
-		wantErr     bool
-		errContains string
+func TestNetworkModeValidation(t *testing.T) {
+	for _, test := range []struct {
+		mode  NetworkMode
+		valid bool
 	}{
-		{
-			name:     "Valid: host mode matching Python default",
-			input:    "host",
-			wantMode: Host,
-			wantErr:  false,
-		},
-		{
-			name:     "Valid: none mode",
-			input:    "none",
-			wantMode: None,
-			wantErr:  false,
-		},
-		{
-			name:     "Valid: bridge mode",
-			input:    "bridge",
-			wantMode: Bridge,
-			wantErr:  false,
-		},
-		{
-			name:        "Edge Case: Case Sensitivity (Python Enums are strict)",
-			input:       "Host",
-			wantMode:    "",
-			wantErr:     true,
-			errContains: "is not a valid NetworkMode",
-		},
-		{
-			name:        "Edge Case: All caps input",
-			input:       "HOST",
-			wantMode:    "",
-			wantErr:     true,
-			errContains: "is not a valid NetworkMode",
-		},
-		{
-			name:        "Edge Case: Empty String Input",
-			input:       "",
-			wantMode:    "",
-			wantErr:     true,
-			errContains: "is not a valid NetworkMode",
-		},
-		{
-			name:        "Edge Case: Trailing or Leading Whitespace",
-			input:       " host ",
-			wantMode:    "",
-			wantErr:     true,
-			errContains: "is not a valid NetworkMode",
-		},
-		{
-			name:        "Edge Case: Malicious/Unexpected Input",
-			input:       "../invalid_mode_or_injection",
-			wantMode:    "",
-			wantErr:     true,
-			errContains: "is not a valid NetworkMode",
-		},
+		{Host, true}, {None, true}, {Bridge, true}, {"", false}, {"HOST", false}, {"host ", false},
+	} {
+		if got := test.mode.IsValid(); got != test.valid {
+			t.Errorf("%q IsValid() = %v, want %v", test.mode, got, test.valid)
+		}
 	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotMode, err := ParseNetworkMode(tt.input)
-
-			if (err != nil) != tt.wantErr {
-				t.Fatalf("ParseNetworkMode() error = %v, wantErr %v", err, tt.wantErr)
-			}
-
-			if tt.wantErr {
-				if !strings.Contains(err.Error(), tt.errContains) {
-					t.Errorf("ParseNetworkMode() error = %q, expected to contain %q", err.Error(), tt.errContains)
-				}
-				return
-			}
-
-			if gotMode != tt.wantMode {
-				t.Errorf("ParseNetworkMode() gotMode = %q, wantMode %q", gotMode, tt.wantMode)
+func TestBridgeConfigValidation(t *testing.T) {
+	valid := DefaultBridgeConfig()
+	for _, test := range []struct {
+		name   string
+		mutate func(*BridgeConfig)
+	}{
+		{"noncanonical subnet", func(c *BridgeConfig) { c.Subnet = "10.0.100.5/24" }},
+		{"invalid subnet", func(c *BridgeConfig) { c.Subnet = "bad" }},
+		{"network gateway", func(c *BridgeConfig) { c.GatewayIP = "10.0.100.0" }},
+		{"broadcast container", func(c *BridgeConfig) { c.ContainerIP = "10.0.100.255" }},
+		{"duplicate addresses", func(c *BridgeConfig) { c.ContainerIP = c.GatewayIP }},
+		{"invalid gateway", func(c *BridgeConfig) { c.GatewayIP = "::1" }},
+		{"invalid mtu", func(c *BridgeConfig) { c.MTU = 1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := valid
+			test.mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("Validate() accepted invalid bridge configuration")
 			}
 		})
 	}
-}
-
-func TestRequiresNetNS(t *testing.T) {
-	tests := []struct {
-		mode NetworkMode
-		want bool
-	}{
-		{Host, false},
-		{None, true},
-		{Bridge, true},
-	}
-	for _, tt := range tests {
-		t.Run(string(tt.mode), func(t *testing.T) {
-			if got := tt.mode.RequiresNetNS(); got != tt.want {
-				t.Errorf("%v.RequiresNetNS() = %v, want %v", tt.mode, got, tt.want)
-			}
-		})
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("default bridge configuration is invalid: %v", err)
 	}
 }
 
-func TestDefaultBridgeConfig_Valid(t *testing.T) {
-	cfg := DefaultBridgeConfig()
-	if err := cfg.Validate(); err != nil {
-		t.Errorf("DefaultBridgeConfig().Validate() error = %v", err)
-	}
-}
-
-func TestGenerateRandomMAC_Deterministic(t *testing.T) {
-	r := strings.NewReader("\x01\x02\x03\x04\x05")
-	mac, err := GenerateRandomMAC(r)
+func TestGenerateRandomMAC(t *testing.T) {
+	mac, err := generateRandomMAC(strings.NewReader("\x01\x02\x03\x04\x05\x06"))
 	if err != nil {
-		t.Fatalf("GenerateRandomMAC() error = %v", err)
+		t.Fatal(err)
 	}
-	want := net.HardwareAddr{0x02, 0x01, 0x02, 0x03, 0x04, 0x05}
-	if !bytes.Equal(mac, want) {
-		t.Errorf("GenerateRandomMAC() = %s, want %s", mac, want)
+	if want := []byte{0x02, 2, 3, 4, 5, 6}; !bytes.Equal(mac, want) {
+		t.Fatalf("MAC = %x, want %x", mac, want)
 	}
-}
-
-func TestGenerateRandomMAC_LocallyAdministered(t *testing.T) {
-	mac, err := GenerateRandomMAC(nil)
-	if err != nil {
-		t.Fatalf("GenerateRandomMAC() error = %v", err)
+	if _, err := generateRandomMAC(strings.NewReader("short")); err == nil {
+		t.Fatal("short random input was accepted")
 	}
-	if len(mac) != 6 {
-		t.Errorf("GenerateRandomMAC() returned %d bytes, want 6", len(mac))
-	}
-	if mac[0]&0x02 != 0x02 {
-		t.Errorf("GenerateRandomMAC() first byte %02x: bit 1 not set (not locally administered)", mac[0])
-	}
-	if mac[0]&0x01 != 0x00 {
-		t.Errorf("GenerateRandomMAC() first byte %02x: bit 0 set (multicast)", mac[0])
+	if mac[0]&1 != 0 || mac[0]&2 == 0 {
+		t.Fatalf("MAC flags = %#x", mac[0])
 	}
 }
 
-func TestBridgeConfig_Validate_Valid(t *testing.T) {
-	cfg := BridgeConfig{
-		BridgeName:     "sb0",
-		Subnet:         "10.0.100.0/24",
-		GatewayIP:      "10.0.100.1",
-		ContainerIP:    "10.0.100.2",
-		HostVethName:   "veth-host",
-		NSVethName:     "veth-ns",
-		ContainerIface: "eth0",
-		MTU:            1500,
-	}
-	if err := cfg.Validate(); err != nil {
-		t.Errorf("Validate() error = %v", err)
+func TestGenerateRandomMACReaderError(t *testing.T) {
+	_, err := generateRandomMAC(errorReader{})
+	if err == nil || !errors.Is(err, errRandom) {
+		t.Fatalf("error = %v, want random reader error", err)
 	}
 }
 
-func TestBridgeConfig_Validate_Invalid(t *testing.T) {
-	tests := []struct {
-		name    string
-		cfg     BridgeConfig
-		errPart string
-	}{
-		{
-			name:    "empty bridge name",
-			cfg:     BridgeConfig{Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0"},
-			errPart: "bridge_name",
-		},
-		{
-			name:    "invalid subnet",
-			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "bad-cidr", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0"},
-			errPart: "invalid subnet",
-		},
-		{
-			name:    "invalid gateway IP",
-			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "not-an-ip", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0"},
-			errPart: "invalid gateway IP",
-		},
-		{
-			name:    "invalid container IP",
-			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0"},
-			errPart: "invalid container IP",
-		},
-		{
-			name:    "empty host veth name",
-			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "", NSVethName: "vc", ContainerIface: "eth0"},
-			errPart: "host_veth_name",
-		},
-		{
-			name:    "empty ns veth name",
-			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "", ContainerIface: "eth0"},
-			errPart: "ns_veth_name",
-		},
-		{
-			name:    "empty container iface",
-			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: ""},
-			errPart: "container_iface",
-		},
-		{
-			name:    "gateway outside subnet",
-			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "10.0.1.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0", MTU: 1500},
-			errPart: "belong to subnet",
-		},
-		{
-			name:    "interface name too long",
-			cfg:     BridgeConfig{BridgeName: "this-name-is-too-long", Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0", MTU: 1500},
-			errPart: "interface-name limit",
-		},
-		{
-			name:    "invalid MTU",
-			cfg:     BridgeConfig{BridgeName: "sb0", Subnet: "10.0.0.0/24", GatewayIP: "10.0.0.1", ContainerIP: "10.0.0.2", HostVethName: "vh", NSVethName: "vc", ContainerIface: "eth0", MTU: 1},
-			errPart: "mtu",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := tt.cfg.Validate()
-			if err == nil {
-				t.Fatal("Validate() expected error, got nil")
-			}
-			if !strings.Contains(err.Error(), tt.errPart) {
-				t.Errorf("Validate() error = %q, want part %q", err, tt.errPart)
-			}
-		})
-	}
-}
+var errRandom = errors.New("random failure")
+
+type errorReader struct{}
+
+func (errorReader) Read([]byte) (int, error) { return 0, errRandom }

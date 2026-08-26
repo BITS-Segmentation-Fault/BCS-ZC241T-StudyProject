@@ -128,7 +128,7 @@ func Parent(cfg config.Config) int {
 	}
 
 	if cfg.NetworkMode == network.Bridge {
-		if err := network.MoveVethToChild(cmd.Process.Pid, cfg.BridgeConfig); err != nil {
+		if err := network.MoveVethToChild(bridgeState, cmd.Process.Pid); err != nil {
 			terminateChild(cmd)
 			closeFiles(p2cW, c2pR)
 			cleanupBridge(bridgeState, cfg)

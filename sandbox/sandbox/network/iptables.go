@@ -34,11 +34,11 @@ func (r *realFirewallOps) DeleteMetadataBlock(destination, label string) error {
 	return runFirewall("-D", "FORWARD", "-d", destination, "-m", "comment", "--comment", label, "-j", "DROP")
 }
 
-func (m *BridgeManager) SetupNAT(cfg BridgeConfig) (*NATState, error) {
-	if err := m.ops.Firewall.AddNAT(cfg.Subnet, cfg.BridgeName, m.runID); err != nil {
+func (m *bridgeManager) setupNAT(cfg BridgeConfig, bridgeName string) (*natState, error) {
+	if err := m.ops.firewall.AddNAT(cfg.Subnet, bridgeName, m.runID); err != nil {
 		return nil, fmt.Errorf("failed to add owned NAT rule: %v", err)
 	}
-	return &NATState{Config: cfg, manager: m, label: m.runID}, nil
+	return &natState{config: cfg, manager: m, bridge: bridgeName, label: m.runID}, nil
 }
 
 func SetupNATForBridge(state *BridgeState, cfg BridgeConfig) error {
@@ -48,15 +48,15 @@ func SetupNATForBridge(state *BridgeState, cfg BridgeConfig) error {
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("bridge config validation failed: %v", err)
 	}
-	natState, err := state.manager.SetupNAT(cfg)
+	natState, err := state.manager.setupNAT(cfg, state.bridge)
 	if err != nil {
 		return err
 	}
-	state.NAT = natState
+	state.nat = natState
 	return nil
 }
 
-func TeardownNATState(state *NATState) error {
+func teardownNATState(state *natState) error {
 	if state == nil || state.manager == nil {
 		return nil
 	}
@@ -67,10 +67,10 @@ func TeardownNATState(state *NATState) error {
 	}
 	var firstErr error
 	if len(state.metadata) == 0 {
-		firstErr = state.manager.ops.Firewall.DeleteNAT(state.Config.Subnet, state.Config.BridgeName, state.label)
+		firstErr = state.manager.ops.firewall.DeleteNAT(state.config.Subnet, state.bridge, state.label)
 	} else {
 		for _, destination := range state.metadata {
-			if err := state.manager.ops.Firewall.DeleteMetadataBlock(destination, state.label); err != nil && firstErr == nil {
+			if err := state.manager.ops.firewall.DeleteMetadataBlock(destination, state.label); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
@@ -85,7 +85,8 @@ func SetupNAT(cfg BridgeConfig) error {
 	if err := CheckBridgePrerequisites(); err != nil {
 		return err
 	}
-	_, err := NewBridgeManager(Operations{}).SetupNAT(cfg)
+	m := newBridgeManager(operations{})
+	_, err := m.setupNAT(cfg, "")
 	return err
 }
 
@@ -95,32 +96,32 @@ func TeardownNAT(cfg BridgeConfig) error {
 	if err := CheckBridgePrerequisites(); err != nil {
 		return err
 	}
-	m := NewBridgeManager(Operations{})
-	return m.ops.Firewall.DeleteNAT(cfg.Subnet, cfg.BridgeName, m.runID)
+	m := newBridgeManager(operations{})
+	return m.ops.firewall.DeleteNAT(cfg.Subnet, "", m.runID)
 }
 
-func (m *BridgeManager) BlockHostMetadata() (*NATState, error) {
+func (m *bridgeManager) blockHostMetadata() (*natState, error) {
 	for _, destination := range []string{"169.254.169.254", "169.254.0.0/16"} {
-		if err := m.ops.Firewall.AddMetadataBlock(destination, m.runID); err != nil {
+		if err := m.ops.firewall.AddMetadataBlock(destination, m.runID); err != nil {
 			for _, rollbackDestination := range []string{"169.254.169.254", "169.254.0.0/16"} {
 				if rollbackDestination == destination {
 					break
 				}
-				_ = m.ops.Firewall.DeleteMetadataBlock(rollbackDestination, m.runID)
+				_ = m.ops.firewall.DeleteMetadataBlock(rollbackDestination, m.runID)
 			}
 			return nil, fmt.Errorf("failed to add metadata block: %v", err)
 		}
 	}
-	return &NATState{manager: m, label: m.runID, metadata: []string{"169.254.169.254", "169.254.0.0/16"}}, nil
+	return &natState{manager: m, label: m.runID, metadata: []string{"169.254.169.254", "169.254.0.0/16"}}, nil
 }
 
 func BlockHostMetadata() error {
 	if err := CheckBridgePrerequisites(); err != nil {
 		return err
 	}
-	m := NewBridgeManager(Operations{})
+	m := newBridgeManager(operations{})
 	m.runID = "study-project-metadata"
-	_, err := m.BlockHostMetadata()
+	_, err := m.blockHostMetadata()
 	return err
 }
 
@@ -128,12 +129,16 @@ func UnblockHostMetadata() error {
 	if err := CheckBridgePrerequisites(); err != nil {
 		return err
 	}
-	m := NewBridgeManager(Operations{})
+	m := newBridgeManager(operations{})
 	m.runID = "study-project-metadata"
 	for _, destination := range []string{"169.254.169.254", "169.254.0.0/16"} {
-		if err := m.ops.Firewall.DeleteMetadataBlock(destination, m.runID); err != nil {
+		if err := m.ops.firewall.DeleteMetadataBlock(destination, m.runID); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (state *natState) managerName() string {
+	return state.bridge
 }
