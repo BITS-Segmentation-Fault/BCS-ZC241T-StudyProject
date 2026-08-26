@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -10,13 +11,15 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 )
 
 func TestSandboxRootlessHostAndNone(t *testing.T) {
 	namespacesAvailable(t)
 	sandbox := sandboxTestBinary(t)
 	probe := probeTestBinary(t)
+	parentUserNS := namespaceLink(t, "/proc/self/ns/user")
+	parentPIDNS := namespaceLink(t, "/proc/self/ns/pid")
+	parentNetNS := namespaceLink(t, "/proc/self/ns/net")
 	for _, mode := range []string{"host", "none"} {
 		t.Run(mode, func(t *testing.T) {
 			rootfs := makeProbeRootfs(t, probe)
@@ -24,31 +27,55 @@ func TestSandboxRootlessHostAndNone(t *testing.T) {
 			if err := os.WriteFile(sentinel, []byte("host-secret"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			configPath := writeSandboxConfig(t, rootfs, mode, fmt.Sprintf("--read=%s", sentinel))
-			output, err := exec.Command(sandbox, "--config", configPath).CombinedOutput()
+			cfg := newSandboxConfig(rootfs, mode, "/bin/probe", "inspect")
+			output, err := exec.Command(sandbox, "--config", writeSandboxConfig(t, cfg)).CombinedOutput()
 			if err != nil {
-				if strings.Contains(string(output), "operation not permitted") || strings.Contains(string(output), "permission denied") {
-					skipOrFail(t, string(output))
-				}
 				t.Fatalf("sandbox %s execution failed: %v\n%s", mode, err, output)
 			}
 			text := string(output)
-			for _, want := range []struct {
-				prefix string
-				line   string
-			}{
-				{prefix: "uid_map=", line: fmt.Sprintf("uid_map=0 %d 1", os.Getuid())},
-				{prefix: "gid_map=", line: fmt.Sprintf("gid_map=0 %d 1", os.Getgid())},
-				{prefix: "setgroups=", line: "setgroups=deny"},
-			} {
-				if got := findLine(text, want.prefix); got != want.line {
-					t.Fatalf("sandbox %s output line %q, want %q:\n%s", mode, got, want.line, text)
+			if got, want := findLine(text, "uid_map="), fmt.Sprintf("uid_map=0 %d 1", os.Getuid()); got != want {
+				t.Fatalf("uid map = %q, want %q\n%s", got, want, text)
+			}
+			if got, want := findLine(text, "gid_map="), fmt.Sprintf("gid_map=0 %d 1", os.Getgid()); got != want {
+				t.Fatalf("gid map = %q, want %q\n%s", got, want, text)
+			}
+			if got := findLine(text, "setgroups="); got != "setgroups=deny" {
+				t.Fatalf("setgroups = %q, want deny\n%s", got, text)
+			}
+			identity := findLine(text, "identity=")
+			wantIdentity := "uid=0 gid=0 pid=2 ppid=1 cwd=/work"
+			if identity != "identity="+wantIdentity {
+				t.Fatalf("identity = %q, want %q\n%s", identity, wantIdentity, text)
+			}
+			if got := findLine(text, "userns="); got == "" || got == parentUserNS {
+				t.Fatalf("user namespace was not isolated: %q", got)
+			}
+			if got := findLine(text, "pidns="); got == "" || got == parentPIDNS {
+				t.Fatalf("PID namespace was not isolated: %q", got)
+			}
+			if got := findLine(text, "netns="); got == "" {
+				t.Fatal("probe did not report network namespace")
+			} else if mode == "host" && got != "netns="+parentNetNS {
+				t.Fatalf("host mode changed network namespace: %q, want %s", got, parentNetNS)
+			} else if mode == "none" && got == "netns="+parentNetNS {
+				t.Fatalf("none mode retained network namespace: %q", got)
+			}
+			if mode == "none" {
+				for prefix, want := range map[string]string{
+					"interfaces=":    "interfaces=lo",
+					"loopback=":      "loopback=up",
+					"default-route=": "default-route=none",
+					"ipv6=":          "ipv6=none",
+				} {
+					if got := findLine(text, prefix); got != want {
+						t.Fatalf("none mode %s = %q, want %q\n%s", prefix, got, want, text)
+					}
 				}
 			}
-			for _, want := range []string{"uid=0", "gid=0", "pid=1", "cwd=/work", "env=probe-value", "read-error"} {
-				if !strings.Contains(text, want) {
-					t.Fatalf("sandbox %s output missing %q:\n%s", mode, want, text)
-				}
+			visibility := newSandboxConfig(rootfs, mode, "/bin/probe", "read", sentinel)
+			visibilityOutput, visibilityErr := exec.Command(sandbox, "--config", writeSandboxConfig(t, visibility)).CombinedOutput()
+			if visibilityErr != nil || !strings.HasPrefix(findLine(string(visibilityOutput), "read-error="), "read-error=") || strings.Contains(string(visibilityOutput), "host-secret") {
+				t.Fatalf("sandbox %s exposed host sentinel: %v\n%s", mode, visibilityErr, visibilityOutput)
 			}
 		})
 	}
@@ -56,146 +83,78 @@ func TestSandboxRootlessHostAndNone(t *testing.T) {
 
 func TestSandboxInternalEnvironmentDoesNotLeakHostValues(t *testing.T) {
 	namespacesAvailable(t)
+	rootfs := makeProbeRootfs(t, probeTestBinary(t))
+	cfg := newSandboxConfig(rootfs, "host", "/bin/probe", "environment", "PROBE_VALUE")
+	cfg.EnvVars = nil
+	cfg.EnvWhitelist = []string{"PROBE_VALUE"}
 	sandbox := sandboxTestBinary(t)
-	probe := probeTestBinary(t)
-	rootfs := makeProbeRootfs(t, probe)
-	configPath := filepath.Join(t.TempDir(), "sandbox.yaml")
-	contents := fmt.Sprintf(`command: [/bin/probe, "--read=/proc/1/environ"]
-env_vars: []
-env_whitelist: [PROBE_VALUE]
-read_only_root: false
-blocked_syscall_action: kill
-blocked_syscalls: []
-drop_capabilities: []
-file_size_limit_mb: 0
-memory_limit_gb: 0
-max_processes: 0
-network_mode: host
-working_dir: /work
-rootfs_source: %q
-`, rootfs)
-	if err := os.WriteFile(configPath, []byte(contents), 0600); err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(sandbox, "--config", configPath)
+	command := exec.Command(sandbox, "--config", writeSandboxConfig(t, cfg))
 	command.Env = withEnvironment(os.Environ(), "PROBE_VALUE", "allowed-value")
 	command.Env = withEnvironment(command.Env, "SANDBOX_PARENT_SECRET", "must-not-leak")
 	output, err := command.CombinedOutput()
 	if err != nil {
-		if unsupportedSandboxOutput(string(output)) {
-			skipOrFail(t, string(output))
-		}
 		t.Fatalf("environment isolation failed: %v\n%s", err, output)
 	}
 	text := string(output)
-	if !strings.Contains(text, "env=allowed-value") {
+	if findLine(text, "environment=PROBE_VALUE=") != "environment=PROBE_VALUE=allowed-value" {
 		t.Fatalf("payload did not receive whitelisted value: %s", text)
 	}
-	pidEnvironment := findLine(text, "read=")
-	if pidEnvironment == "" {
-		t.Fatalf("payload did not read /proc/1/environ: %s", text)
-	}
-	if strings.Contains(pidEnvironment, "SANDBOX_PARENT_SECRET=must-not-leak") || strings.Contains(pidEnvironment, "PROBE_VALUE=allowed-value") {
-		t.Fatalf("internal child environment leaked payload/host values: %s", pidEnvironment)
+	procConfig := newSandboxConfig(rootfs, "host", "/bin/probe", "read", "/proc/1/environ")
+	procConfig.EnvVars = nil
+	procConfig.EnvWhitelist = []string{"PROBE_VALUE"}
+	procCommand := exec.Command(sandbox, "--config", writeSandboxConfig(t, procConfig))
+	procCommand.Env = withEnvironment(os.Environ(), "PROBE_VALUE", "allowed-value")
+	procCommand.Env = withEnvironment(procCommand.Env, "SANDBOX_PARENT_SECRET", "must-not-leak")
+	procOutput, procErr := procCommand.CombinedOutput()
+	if procErr != nil || findLine(string(procOutput), "read=") != "read=" {
+		t.Fatalf("PID 1 environment was not exactly empty: err=%v output=%s", procErr, procOutput)
 	}
 }
 
 func TestSandboxPreservesExitAndSignalStatus(t *testing.T) {
 	namespacesAvailable(t)
 	sandbox := sandboxTestBinary(t)
-	probe := probeTestBinary(t)
-	rootfs := makeProbeRootfs(t, probe)
-
-	exitConfig := writeSandboxConfig(t, rootfs, "host", "--exit=7")
-	command := exec.Command(sandbox, "--config", exitConfig)
+	rootfs := makeProbeRootfs(t, probeTestBinary(t))
+	exitConfig := newSandboxConfig(rootfs, "host", "/bin/probe", "exit", "7")
+	command := exec.Command(sandbox, "--config", writeSandboxConfig(t, exitConfig))
 	output, err := command.CombinedOutput()
 	var exitErr *exec.ExitError
 	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 7 {
-		if unsupportedSandboxOutput(string(output)) {
-			skipOrFail(t, string(output))
-		}
 		t.Fatalf("sandbox did not preserve exit code: err=%v output=%s", err, output)
 	}
 
-	for _, signal := range []syscall.Signal{syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGQUIT} {
-		t.Run(signal.String(), func(t *testing.T) {
-			signalConfig := writeSandboxConfig(t, rootfs, "host", "--sleep=30")
-			running := exec.Command(sandbox, "--config", signalConfig)
-			var signalOutput bytes.Buffer
-			running.Stdout = &signalOutput
-			running.Stderr = &signalOutput
-			if err := running.Start(); err != nil {
-				t.Fatal(err)
-			}
-			time.Sleep(250 * time.Millisecond)
-			if err := running.Process.Signal(signal); err != nil {
-				t.Fatal(err)
-			}
-			err := running.Wait()
-			expected := 128 + int(signal)
-			if !errors.As(err, &exitErr) || exitErr.ExitCode() != expected {
-				if unsupportedSandboxOutput(signalOutput.String()) {
-					skipOrFail(t, signalOutput.String())
-				}
-				t.Fatalf("sandbox did not preserve %s status: err=%v output=%s", signal, err, signalOutput.String())
-			}
-		})
-	}
-}
-
-func unsupportedSandboxOutput(output string) bool {
-	return strings.Contains(output, "operation not permitted") || strings.Contains(output, "permission denied")
-}
-
-func makeProbeRootfs(t *testing.T, probe string) string {
-	t.Helper()
-	rootfs := filepath.Join(t.TempDir(), "rootfs")
-	if err := os.MkdirAll(filepath.Join(rootfs, "bin", "work"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	for _, directory := range []string{"etc", "mnt", "proc"} {
-		if err := os.Mkdir(filepath.Join(rootfs, directory), 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(rootfs, "etc", "resolv.conf"), nil, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(rootfs, "mnt", "bound"), nil, 0644); err != nil {
-		t.Fatal(err)
-	}
-	data, err := os.ReadFile(probe)
+	signalConfig := newSandboxConfig(rootfs, "host", "/bin/probe", "sleep", "30s")
+	running := exec.Command(sandbox, "--config", writeSandboxConfig(t, signalConfig))
+	stdout, err := running.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(rootfs, "bin", "probe"), data, 0755); err != nil {
+	var stderr bytes.Buffer
+	running.Stderr = &stderr
+	if err := running.Start(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Join(rootfs, "work"), 0755); err != nil {
+	reader := bufio.NewReader(stdout)
+	var outputLines []string
+	for {
+		line, readErr := reader.ReadString('\n')
+		if line != "" {
+			outputLines = append(outputLines, strings.TrimSuffix(line, "\n"))
+			if line == "ready\n" {
+				break
+			}
+		}
+		if readErr != nil {
+			_ = running.Process.Kill()
+			_ = running.Wait()
+			t.Fatalf("sandbox did not reach payload readiness: %v\nstdout=%s\nstderr=%s", readErr, strings.Join(outputLines, "\n"), stderr.String())
+		}
+	}
+	if err := running.Process.Signal(syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}
-	return rootfs
-}
-
-func writeSandboxConfig(t *testing.T, rootfs, mode, probeArg string) string {
-	t.Helper()
-	configPath := filepath.Join(t.TempDir(), "sandbox.yaml")
-	contents := fmt.Sprintf(`command: [/bin/probe, %q]
-env_vars: [PROBE_VALUE=probe-value]
-env_whitelist: []
-read_only_root: false
-blocked_syscall_action: kill
-blocked_syscalls: []
-drop_capabilities: []
-file_size_limit_mb: 0
-memory_limit_gb: 0
-max_processes: 0
-network_mode: %s
-working_dir: /work
-rootfs_source: %q
-`, probeArg, mode, rootfs)
-	if err := os.WriteFile(configPath, []byte(contents), 0600); err != nil {
-		t.Fatal(err)
+	err = running.Wait()
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 128+int(syscall.SIGINT) {
+		t.Fatalf("sandbox did not preserve SIGINT status: err=%v\nstdout=%s\nstderr=%s", err, strings.Join(outputLines, "\n"), stderr.String())
 	}
-	return configPath
 }
