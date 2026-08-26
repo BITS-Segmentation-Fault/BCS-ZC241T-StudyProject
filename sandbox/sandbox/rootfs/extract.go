@@ -11,8 +11,6 @@ import (
 	"os"
 	"path"
 	"strings"
-
-	"golang.org/x/sys/unix"
 )
 
 // rootfsLimits bounds extracted and cached trees independently of archive size.
@@ -294,40 +292,6 @@ func validateInternalTarget(name, target string) error {
 	clean := path.Clean(candidate)
 	if clean == ".." || strings.HasPrefix(clean, "../") {
 		return fmt.Errorf("rootfs symlink %q escapes the extraction root", name)
-	}
-	return nil
-}
-
-func validateRootfsLayout(root string) error {
-	rootFD, err := openDirectoryPath(root)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(rootFD)
-	return validateRootfsLayoutFD(rootFD)
-}
-
-func validateRootfsLayoutFD(rootFD int) error {
-	required := map[string]bool{
-		"bin/sh":             false,
-		"bin/echo":           false,
-		"etc":                true,
-		"proc":               true,
-		"etc/alpine-release": false,
-	}
-	for name, directory := range required {
-		entry, err := openRelativeEntry(rootFD, name)
-		if err != nil {
-			return fmt.Errorf("managed rootfs is missing %s: %v", name, err)
-		}
-		info := entry.stat.Mode & unix.S_IFMT
-		unix.Close(entry.fd)
-		if directory && info != unix.S_IFDIR {
-			return fmt.Errorf("managed rootfs entry %s is not a directory", name)
-		}
-		if !directory && info == unix.S_IFDIR {
-			return fmt.Errorf("managed rootfs entry %s is a directory", name)
-		}
 	}
 	return nil
 }

@@ -46,7 +46,7 @@ If `rootfs_source` is omitted or empty, the host-side parent provisions the
 managed rootfs before creating cgroups, network resources, or namespaces. This
 also applies when the requested network mode is `none`. The first launch
 downloads the pinned Alpine 3.24.1 minirootfs archive over HTTPS, verifies its
-embedded SHA-256 digest, securely extracts it, writes a manifest, and publishes
+pinned SHA-256 digest, securely extracts it, writes a manifest, and publishes
 it atomically. Later launches reuse the verified cache and work offline.
 
 The cache is under `os.UserCacheDir()`:
@@ -64,15 +64,16 @@ while extracted and cached trees are limited to 512 MiB total, 128 MiB per
 file, and 100,000 entries.
 
 To force a fresh managed download, remove the matching managed architecture
-directory and launch again. A custom non-empty `rootfs_source` is user-managed:
-it must already exist, is never downloaded or repaired, and is not modified by
-the provisioning code. The payload must be present in the selected rootfs;
+directory and launch again. A custom non-empty `rootfs_source` is user-managed
+and may contain any compatible Linux rootfs: it must already exist, is never
+downloaded or repaired, and is not modified by the provisioning code. The
+payload must be present in the selected rootfs;
 `/bin/echo` is available in the managed Alpine rootfs.
 
 The namespace-free archive maintenance check can be run with
 `SANDBOX_ALPINE_MAINTENANCE=1`; it downloads both pinned archives, verifies
-their archive digests, extracts their production layouts, and verifies their
-tree digests. The managed-rootfs E2E check can be enabled with
+their archive digests, securely extracts them, and verifies their tree digests.
+The managed-rootfs E2E check can be enabled with
 `SANDBOX_MANAGED_ROOTFS_E2E=1`; it uses a fresh temporary `XDG_CACHE_HOME`,
 then repeats the launch with unusable proxy settings to verify offline reuse.
 
