@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 
 	"sandbox/sandbox/common"
+	"sandbox/sandbox/config"
 	"sandbox/sandbox/fs"
 	"sandbox/sandbox/network"
 	"sandbox/sandbox/resources"
@@ -18,50 +20,6 @@ import (
 
 	"golang.org/x/sys/unix"
 )
-
-var capabilityNameToValue = map[string]uintptr{
-	"CAP_SYS_ADMIN":          unix.CAP_SYS_ADMIN,
-	"CAP_NET_ADMIN":          unix.CAP_NET_ADMIN,
-	"CAP_SYS_PTRACE":         unix.CAP_SYS_PTRACE,
-	"CAP_SYS_MODULE":         unix.CAP_SYS_MODULE,
-	"CAP_SYS_RAWIO":          unix.CAP_SYS_RAWIO,
-	"CAP_SYS_BOOT":           unix.CAP_SYS_BOOT,
-	"CAP_SYS_TIME":           unix.CAP_SYS_TIME,
-	"CAP_SYSLOG":             unix.CAP_SYSLOG,
-	"CAP_NET_RAW":            unix.CAP_NET_RAW,
-	"CAP_NET_BIND_SERVICE":   unix.CAP_NET_BIND_SERVICE,
-	"CAP_DAC_OVERRIDE":       unix.CAP_DAC_OVERRIDE,
-	"CAP_CHOWN":              unix.CAP_CHOWN,
-	"CAP_FOWNER":             unix.CAP_FOWNER,
-	"CAP_KILL":               unix.CAP_KILL,
-	"CAP_SETUID":             unix.CAP_SETUID,
-	"CAP_SETGID":             unix.CAP_SETGID,
-	"CAP_SETPCAP":            unix.CAP_SETPCAP,
-	"CAP_MKNOD":              unix.CAP_MKNOD,
-	"CAP_AUDIT_WRITE":        unix.CAP_AUDIT_WRITE,
-	"CAP_AUDIT_CONTROL":      unix.CAP_AUDIT_CONTROL,
-	"CAP_MAC_OVERRIDE":       unix.CAP_MAC_OVERRIDE,
-	"CAP_MAC_ADMIN":          unix.CAP_MAC_ADMIN,
-	"CAP_SYS_NICE":           unix.CAP_SYS_NICE,
-	"CAP_SYS_RESOURCE":       unix.CAP_SYS_RESOURCE,
-	"CAP_SYS_TTY_CONFIG":     unix.CAP_SYS_TTY_CONFIG,
-	"CAP_IPC_LOCK":           unix.CAP_IPC_LOCK,
-	"CAP_IPC_OWNER":          unix.CAP_IPC_OWNER,
-	"CAP_NET_BROADCAST":      unix.CAP_NET_BROADCAST,
-	"CAP_WAKE_ALARM":         unix.CAP_WAKE_ALARM,
-	"CAP_BLOCK_SUSPEND":      unix.CAP_BLOCK_SUSPEND,
-	"CAP_DAC_READ_SEARCH":    unix.CAP_DAC_READ_SEARCH,
-	"CAP_FSETID":             unix.CAP_FSETID,
-	"CAP_LINUX_IMMUTABLE":    unix.CAP_LINUX_IMMUTABLE,
-	"CAP_SYS_CHROOT":         unix.CAP_SYS_CHROOT,
-	"CAP_SYS_PACCT":          unix.CAP_SYS_PACCT,
-	"CAP_LEASE":              unix.CAP_LEASE,
-	"CAP_SETFCAP":            unix.CAP_SETFCAP,
-	"CAP_AUDIT_READ":         unix.CAP_AUDIT_READ,
-	"CAP_PERFMON":            unix.CAP_PERFMON,
-	"CAP_BPF":                unix.CAP_BPF,
-	"CAP_CHECKPOINT_RESTORE": unix.CAP_CHECKPOINT_RESTORE,
-}
 
 const gbToBytes = 1024 * 1024 * 1024
 
@@ -163,6 +121,7 @@ func Child(p2cRFd, c2pWFd int) int {
 			return 1
 		}
 	}
+	runtime.LockOSThread()
 
 	// Setup that needs namespace capabilities is complete. The executable gets
 	// no effective, permitted, inheritable, ambient, or bounding capabilities.
@@ -204,25 +163,50 @@ func waitForParentSetup(readFD, writeFD int) error {
 	return nil
 }
 
-func dropCapabilities(capabilities []string) error {
-	mask := make(map[uintptr]struct{})
-	for _, name := range capabilities {
-		name = strings.ToUpper(strings.TrimSpace(name))
+func dropCapabilities(requested []string) error {
+	if len(requested) == 0 {
+		return nil
+	}
+	drop := make([]bool, 64)
+	all := false
+	for _, raw := range requested {
+		name := strings.ToUpper(strings.TrimSpace(raw))
 		if name == "ALL" {
-			for capability := uintptr(0); capability <= lastCapability(); capability++ {
-				mask[capability] = struct{}{}
-			}
+			all = true
 			continue
 		}
-		capability, ok := capabilityNameToValue[name]
+		number, ok := config.CapabilityNumber(name)
 		if !ok {
-			return fmt.Errorf("unknown capability %q", name)
+			return fmt.Errorf("unknown capability %q", raw)
 		}
-		mask[capability] = struct{}{}
+		if number >= uintptr(len(drop)) {
+			return fmt.Errorf("capability %q exceeds Linux v3 capability width", raw)
+		}
+		drop[number] = true
 	}
-	for capability := range mask {
-		if err := unix.Prctl(unix.PR_CAPBSET_DROP, capability, 0, 0, 0); err != nil && err != unix.EPERM {
-			return fmt.Errorf("drop capability %d from bounding set: %v", capability, err)
+	if all {
+		last, err := lastCapability()
+		if err != nil {
+			return err
+		}
+		if last >= uintptr(len(drop)) {
+			return fmt.Errorf("kernel capability %d exceeds Linux v3 capability width", last)
+		}
+		for number := uintptr(0); number <= last; number++ {
+			drop[number] = true
+		}
+	}
+	for number := uintptr(0); number < uintptr(len(drop)); number++ {
+		if number == unix.CAP_SETPCAP || !drop[number] {
+			continue
+		}
+		if err := unix.Prctl(unix.PR_CAPBSET_DROP, number, 0, 0, 0); err != nil {
+			return fmt.Errorf("drop capability %d from bounding set: %w", number, err)
+		}
+	}
+	if drop[unix.CAP_SETPCAP] {
+		if err := unix.Prctl(unix.PR_CAPBSET_DROP, unix.CAP_SETPCAP, 0, 0, 0); err != nil {
+			return fmt.Errorf("drop capability %d from bounding set: %w", unix.CAP_SETPCAP, err)
 		}
 	}
 
@@ -232,9 +216,12 @@ func dropCapabilities(capabilities []string) error {
 	if err := unix.Capget(&header, &data[0]); err != nil {
 		return fmt.Errorf("read capability sets: %v", err)
 	}
-	for capability := range mask {
-		word := capability / 32
-		bit := uint32(1) << (capability % 32)
+	for number, selected := range drop {
+		if !selected {
+			continue
+		}
+		word := number / 32
+		bit := uint32(1) << (number % 32)
 		data[word].Effective &^= bit
 		data[word].Permitted &^= bit
 		data[word].Inheritable &^= bit
@@ -248,14 +235,16 @@ func dropCapabilities(capabilities []string) error {
 	return nil
 }
 
-func lastCapability() uintptr {
+func lastCapability() (uintptr, error) {
 	data, err := os.ReadFile("/proc/sys/kernel/cap_last_cap")
-	if err == nil {
-		if value, parseErr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 32); parseErr == nil {
-			return uintptr(value)
-		}
+	if err != nil {
+		return 0, fmt.Errorf("read kernel capability limit: %w", err)
 	}
-	return unix.CAP_LAST_CAP
+	value, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("parse kernel capability limit: %w", err)
+	}
+	return uintptr(value), nil
 }
 
 func resourceBytes(value int, multiplier uint64, name string) (uint64, error) {
