@@ -36,13 +36,6 @@ go_library(
 )
 
 go_library(
-    name = "diag",
-    srcs = ["diag/diag.go"],
-    importpath = "sandbox/sandbox/diag",
-    deps = [":utils"],
-)
-
-go_library(
     name = "resources",
     srcs = glob(["resources/*.go"], exclude = ["resources/*_test.go"]),
     importpath = "sandbox/sandbox/resources",
@@ -64,12 +57,6 @@ go_library(
         ":config",
         "@org_golang_x_sys//unix:go_default_library",
     ],
-)
-
-go_library(
-    name = "utils",
-    srcs = ["utils/utils.go"],
-    importpath = "sandbox/sandbox/utils",
 )
 
 go_library(
@@ -111,7 +98,6 @@ go_binary(
         ":network",
         ":parent",
         ":security",
-        ":utils",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )
@@ -133,7 +119,6 @@ go_test(
         ":network",
         ":parent",
         ":security",
-        ":utils",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )
@@ -169,12 +154,6 @@ go_test(
     name = "network_test",
     srcs = glob(["network/*.go"]),
     importpath = "sandbox/sandbox/network",
-)
-
-go_test(
-    name = "utils_test",
-    srcs = glob(["utils/*.go"]),
-    importpath = "sandbox/sandbox/utils",
 )
 
 go_test(
@@ -232,7 +211,6 @@ go_test(
         ":network",
         ":parent",
         ":security",
-        ":utils",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )
@@ -256,7 +234,6 @@ go_test(
         ":network",
         ":parent",
         ":security",
-        ":utils",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )
@@ -279,7 +256,6 @@ go_test(
         ":network",
         ":parent",
         ":security",
-        ":utils",
         "@org_golang_x_sys//unix:go_default_library",
     ],
 )

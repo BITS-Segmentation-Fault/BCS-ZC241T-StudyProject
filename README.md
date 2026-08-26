@@ -118,6 +118,9 @@ flags must precede the command, and `--` explicitly terminates the flag
 section. Environment names must be valid shell variable names and duplicate
 keys are rejected.
 
+Standard output belongs to the payload. Sandbox diagnostics, including setup
+failures, are written to standard error.
+
 Storage uses `RLIMIT_FSIZE`, which is a per-file size limit rather than a
 total disk quota. Set `file_size_limit_mb` or `--file-size-limit`; zero
 disables it. The limit is applied as both the soft and hard ceiling. Bind

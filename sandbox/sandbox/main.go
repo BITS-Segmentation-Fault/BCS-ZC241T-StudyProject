@@ -27,11 +27,11 @@ func main() {
 		os.Exit(child.Child(childReadFD))
 	}
 
-	parsed, err := ParseArgs(publicArgs)
+	cfg, err := ParseArgs(publicArgs)
 	if err != nil {
 		fatal(err)
 	}
-	os.Exit(parent.Parent(parsed.Config))
+	os.Exit(parent.Parent(cfg))
 }
 
 func splitInternalInvocation(argv []string) (bool, []string, error) {
