@@ -30,7 +30,7 @@ func TestPinnedAlpineArchives(t *testing.T) {
 			if err := os.Mkdir(root, 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := extractArchive(archivePath, root, defaultExtractionLimits); err != nil {
+			if err := extractArchive(archivePath, root, defaultRootfsLimits); err != nil {
 				t.Fatal(err)
 			}
 			if err := validateRootfsLayout(root); err != nil {

@@ -58,8 +58,10 @@ The cache is under `os.UserCacheDir()`:
 
 Go `amd64` maps to Alpine `x86_64`, and Go `arm64` maps to Alpine `aarch64`.
 Other architectures are rejected before any network request. The archive name,
-size ceiling, release URL, and digest are pinned in reviewed Go source; the
-mutable `latest-stable` release path is not used.
+release URL, and digests are pinned in reviewed Go source; the mutable
+`latest-stable` release path is not used. Downloads have a fixed 64 MiB cap,
+while extracted and cached trees are limited to 512 MiB total, 128 MiB per
+file, and 100,000 entries.
 
 To force a fresh managed download, remove the matching managed architecture
 directory and launch again. A custom non-empty `rootfs_source` is user-managed:

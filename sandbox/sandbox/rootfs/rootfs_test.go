@@ -90,12 +90,11 @@ func archiveRelease(t *testing.T, body []byte) releaseInfo {
 	}
 	digest := sha256.Sum256(body)
 	return releaseInfo{
-		AlpineArch:      production.AlpineArch,
-		ArchiveName:     "synthetic-rootfs.tar.gz",
-		URL:             testReleaseURL,
-		SHA256:          hex.EncodeToString(digest[:]),
-		TreeSHA256:      archiveTreeDigest(t, body),
-		MaxArchiveBytes: int64(len(body)),
+		AlpineArch:  production.AlpineArch,
+		ArchiveName: "synthetic-rootfs.tar.gz",
+		URL:         testReleaseURL,
+		SHA256:      hex.EncodeToString(digest[:]),
+		TreeSHA256:  archiveTreeDigest(t, body),
 	}
 }
 
@@ -109,7 +108,7 @@ func archiveTreeDigest(t *testing.T, body []byte) string {
 	if err := os.Mkdir(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractArchive(archivePath, root, defaultExtractionLimits); err != nil {
+	if err := extractArchive(archivePath, root, defaultRootfsLimits); err != nil {
 		t.Fatalf("extract synthetic archive: %v", err)
 	}
 	digest, err := treeDigest(root)
@@ -237,17 +236,26 @@ func TestProvisioningFailureAndResponseLimits(t *testing.T) {
 		status    int
 		maxBytes  int64
 		badDigest bool
+		streaming bool
 		want      string
 	}{
 		{name: "http failure", status: http.StatusNotFound, want: "404"},
-		{name: "response too large", status: http.StatusOK, maxBytes: int64(len(body) - 1), want: "archive limit"},
+		{name: "declared response too large", status: http.StatusOK, maxBytes: int64(len(body) - 1), want: "download limit"},
+		{name: "streaming response too large", status: http.StatusOK, maxBytes: int64(len(body) - 1), streaming: true, want: "download limit"},
 		{name: "digest mismatch", status: http.StatusOK, badDigest: true, want: "SHA-256 mismatch"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p := testProvisioner(t, body, tt.status, nil)
 			release := p.releases[runtime.GOARCH]
 			if tt.maxBytes != 0 {
-				release.MaxArchiveBytes = tt.maxBytes
+				p.maxArchiveBytes = tt.maxBytes
+			}
+			if tt.streaming {
+				p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+					response := testResponse(http.StatusOK, body)
+					response.ContentLength = -1
+					return response, nil
+				})
 			}
 			if tt.badDigest {
 				release.SHA256 = strings.Repeat("f", 64)
@@ -432,7 +440,7 @@ func TestSecureExtraction(t *testing.T) {
 	tests := []struct {
 		name    string
 		entries []archiveEntry
-		limits  extractionLimits
+		limits  rootfsLimits
 		want    string
 	}{
 		{name: "absolute path", entries: []archiveEntry{{name: "/etc/passwd", kind: tar.TypeReg, mode: 0644, body: []byte("x")}}, want: "absolute"},
@@ -442,8 +450,9 @@ func TestSecureExtraction(t *testing.T) {
 		{name: "duplicate", entries: []archiveEntry{{name: "file", kind: tar.TypeReg, mode: 0644, body: []byte("a")}, {name: "file", kind: tar.TypeReg, mode: 0644, body: []byte("b")}}, want: "duplicate"},
 		{name: "hard link outside", entries: []archiveEntry{{name: "link", kind: tar.TypeLink, mode: 0644, link: "../outside"}}, want: "invalid target"},
 		{name: "device node", entries: []archiveEntry{{name: "dev/null", kind: tar.TypeChar, mode: 0600}}, want: "unsupported type"},
-		{name: "file too large", entries: []archiveEntry{{name: "file", kind: tar.TypeReg, mode: 0644, body: []byte("123")}}, limits: extractionLimits{MaxCompressedBytes: 1 << 20, MaxExtractedBytes: 1 << 20, MaxFileBytes: 2, MaxEntries: 10}, want: "file limit"},
-		{name: "too many entries", entries: []archiveEntry{{name: "one", kind: tar.TypeReg, mode: 0644, body: []byte("1")}, {name: "two", kind: tar.TypeReg, mode: 0644, body: []byte("2")}}, limits: extractionLimits{MaxCompressedBytes: 1 << 20, MaxExtractedBytes: 1 << 20, MaxFileBytes: 10, MaxEntries: 1}, want: "entry limit"},
+		{name: "file too large", entries: []archiveEntry{{name: "file", kind: tar.TypeReg, mode: 0644, body: []byte("123")}}, limits: rootfsLimits{MaxTotalBytes: 1 << 20, MaxFileBytes: 2, MaxEntries: 10}, want: "file limit"},
+		{name: "total too large", entries: []archiveEntry{{name: "one", kind: tar.TypeReg, mode: 0644, body: []byte("123")}, {name: "two", kind: tar.TypeReg, mode: 0644, body: []byte("456")}}, limits: rootfsLimits{MaxTotalBytes: 5, MaxFileBytes: 10, MaxEntries: 10}, want: "extracted-data limit"},
+		{name: "too many entries", entries: []archiveEntry{{name: "one", kind: tar.TypeReg, mode: 0644, body: []byte("1")}, {name: "two", kind: tar.TypeReg, mode: 0644, body: []byte("2")}}, limits: rootfsLimits{MaxTotalBytes: 1 << 20, MaxFileBytes: 10, MaxEntries: 1}, want: "entry limit"},
 	}
 
 	for _, tt := range tests {
@@ -454,8 +463,8 @@ func TestSecureExtraction(t *testing.T) {
 				t.Fatal(err)
 			}
 			limits := tt.limits
-			if limits.MaxCompressedBytes == 0 {
-				limits = defaultExtractionLimits
+			if limits.MaxTotalBytes == 0 {
+				limits = defaultRootfsLimits
 			}
 			destination := filepath.Join(t.TempDir(), "rootfs")
 			if err := os.Mkdir(destination, 0700); err != nil {
@@ -511,7 +520,7 @@ func TestExtractionRejectsRootMarkerWithTheWrongType(t *testing.T) {
 	if err := os.Mkdir(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractArchive(archivePath, root, defaultExtractionLimits); err == nil || !strings.Contains(err.Error(), "root marker") {
+	if err := extractArchive(archivePath, root, defaultRootfsLimits); err == nil || !strings.Contains(err.Error(), "root marker") {
 		t.Fatalf("extractArchive() error = %v, want root-marker error", err)
 	}
 }
@@ -526,7 +535,7 @@ func TestSecureExtractionAllowsInternalLinksAndStripsSpecialBits(t *testing.T) {
 	if err := os.Mkdir(destination, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractArchive(archivePath, destination, defaultExtractionLimits); err != nil {
+	if err := extractArchive(archivePath, destination, defaultRootfsLimits); err != nil {
 		t.Fatalf("extractArchive() error = %v", err)
 	}
 	if err := validateRootfsLayout(destination); err != nil {
@@ -546,7 +555,7 @@ func TestCorruptArchiveIsRejected(t *testing.T) {
 	if err := os.WriteFile(archivePath, []byte("not gzip"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	err := extractArchive(archivePath, filepath.Join(t.TempDir(), "rootfs"), defaultExtractionLimits)
+	err := extractArchive(archivePath, filepath.Join(t.TempDir(), "rootfs"), defaultRootfsLimits)
 	if err == nil || !strings.Contains(err.Error(), "gzip") {
 		t.Fatalf("extractArchive() error = %v, want gzip error", err)
 	}
@@ -601,7 +610,7 @@ func TestTreeDigestEnforcesEntryLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unix.Close(fd)
-	limits := defaultExtractionLimits
+	limits := defaultRootfsLimits
 	limits.MaxEntries = 1
 	if _, err := treeDigestFDWithLimits(fd, limits); err == nil || !strings.Contains(err.Error(), "entry limit") {
 		t.Fatalf("treeDigestFDWithLimits() error = %v, want entry limit", err)
