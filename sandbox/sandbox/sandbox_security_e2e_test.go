@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -43,14 +44,15 @@ func TestSandboxSeccompBlocksConfiguredSyscalls(t *testing.T) {
 	cfg.seccomp = "kill"
 	cfg.blocked = []string{"mount"}
 	output, err := runSecurityProbe(t, rootfs, "none", []string{"--syscall=mount"}, cfg)
-	if err == nil {
-		t.Fatalf("blocked syscall unexpectedly succeeded: %s", output)
-	}
-	if unsupportedSandboxOutput(output) {
-		skipOrFail(t, output)
-	}
 	if !strings.Contains(output, "Handing off") {
 		t.Fatalf("blocked-syscall probe did not reach the payload: %s", output)
+	}
+	if strings.Contains(output, "syscall-ok") || strings.Contains(output, "syscall-error=") {
+		t.Fatalf("blocked-syscall probe survived or reported an ordinary syscall result: %s", output)
+	}
+	exitErr, ok := err.(*exec.ExitError)
+	if !ok || exitErr.ExitCode() != 128+int(syscall.SIGSYS) {
+		t.Fatalf("blocked syscall exit = %v, want %d\n%s", err, 128+int(syscall.SIGSYS), output)
 	}
 }
 
