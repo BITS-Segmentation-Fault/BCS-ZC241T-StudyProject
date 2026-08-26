@@ -5,6 +5,7 @@ package security
 import "golang.org/x/sys/unix"
 
 const auditArchitecture uint32 = 0xc00000b7
+const x32ABIBit uint32 = 0
 
 var syscallNameToNumber = map[string]uint32{
 	"reboot":            uint32(unix.SYS_REBOOT),
