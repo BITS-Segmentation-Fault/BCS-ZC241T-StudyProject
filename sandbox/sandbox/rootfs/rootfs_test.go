@@ -289,9 +289,16 @@ func TestConcurrentProvisioningDownloadsOnce(t *testing.T) {
 func TestAtomicRenameFailureCleansTemporaryRootfs(t *testing.T) {
 	body := minimalArchive(t)
 	p := testProvisioner(t, body, http.StatusOK, nil)
-	p.renamePath = func(string, string) error { return errors.New("rename denied") }
+	var gotFlags uint
+	p.renamePath = func(_ int, _ string, _ int, _ string, flags uint) error {
+		gotFlags = flags
+		return errors.New("rename denied")
+	}
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "atomically publish") {
 		t.Fatalf("rename failure = %v", err)
+	}
+	if gotFlags != unix.RENAME_NOREPLACE {
+		t.Fatalf("first publication flags = %#x, want RENAME_NOREPLACE", gotFlags)
 	}
 	target, _ := cachePath(p.CacheDir, runtime.GOARCH)
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
@@ -299,6 +306,35 @@ func TestAtomicRenameFailureCleansTemporaryRootfs(t *testing.T) {
 	}
 	if temporary, _ := filepath.Glob(filepath.Join(filepath.Dir(target), ".rootfs-*")); len(temporary) != 0 {
 		t.Fatalf("rename failure left temporary directories: %v", temporary)
+	}
+}
+
+func TestProvisioningReportsTemporaryCleanupFailure(t *testing.T) {
+	body := minimalArchive(t)
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	p.renamePath = func(_ int, _ string, toFD int, _ string, _ uint) error {
+		if err := unix.Close(toFD); err != nil {
+			t.Fatalf("close version directory: %v", err)
+		}
+		return errors.New("publish failure")
+	}
+	if _, err := p.Resolve(""); err == nil ||
+		!strings.Contains(err.Error(), "publish failure") ||
+		!strings.Contains(err.Error(), "cannot clean temporary rootfs") {
+		t.Fatalf("Resolve() error = %v, want publication and cleanup failures", err)
+	}
+	target, err := cachePath(p.CacheDir, runtime.GOARCH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	temporaryPaths, err := filepath.Glob(filepath.Join(filepath.Dir(target), ".rootfs-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, temporary := range temporaryPaths {
+		if err := os.RemoveAll(temporary); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -657,7 +693,7 @@ func TestModifiedCachedTreeIsRejectedAndPreservedOffline(t *testing.T) {
 	}
 }
 
-func TestReplacementFailureRestoresPreviousRootfs(t *testing.T) {
+func TestReplacementExchangeFailurePreservesPreviousRootfs(t *testing.T) {
 	body := minimalArchive(t)
 	p := testProvisioner(t, body, http.StatusOK, nil)
 	target, err := p.Resolve("")
@@ -667,20 +703,22 @@ func TestReplacementFailureRestoresPreviousRootfs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(target, manifestName), []byte("{}\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	p.renamePath = func(old, new string) error {
-		if strings.HasSuffix(old, string(os.PathSeparator)+"rootfs") {
-			return errors.New("replacement interrupted")
-		}
-		return os.Rename(old, new)
+	var gotFlags uint
+	p.renamePath = func(_ int, _ string, _ int, _ string, flags uint) error {
+		gotFlags = flags
+		return errors.New("replacement interrupted")
 	}
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "replacement interrupted") {
 		t.Fatalf("Resolve() error = %v, want replacement failure", err)
 	}
+	if gotFlags != unix.RENAME_EXCHANGE {
+		t.Fatalf("replacement flags = %#x, want RENAME_EXCHANGE", gotFlags)
+	}
 	if data, err := os.ReadFile(filepath.Join(target, manifestName)); err != nil || string(data) != "{}\n" {
 		t.Fatalf("previous rootfs was not restored: err=%v data=%q", err, data)
 	}
-	if backups, _ := filepath.Glob(filepath.Join(filepath.Dir(target), ".rootfs-backup-*")); len(backups) != 0 {
-		t.Fatalf("replacement left backups: %v", backups)
+	if temporary, _ := filepath.Glob(filepath.Join(filepath.Dir(target), ".rootfs-*")); len(temporary) != 0 {
+		t.Fatalf("replacement left temporary directories: %v", temporary)
 	}
 }
 

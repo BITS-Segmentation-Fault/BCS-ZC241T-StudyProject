@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -76,7 +77,7 @@ type Provisioner struct {
 	// synthetic archives, while production always uses releaseCatalog above.
 	releases      map[string]releaseInfo
 	makeTemp      func(string, string) (string, error)
-	renamePath    func(string, string) error
+	renamePath    func(int, string, int, string, uint) error
 	allowTestURLs bool
 }
 
@@ -142,7 +143,7 @@ func (p Provisioner) catalog() map[string]releaseInfo {
 	return releaseCatalog
 }
 
-func (p Provisioner) provision(cacheDir, target string, release releaseInfo) (string, error) {
+func (p Provisioner) provision(cacheDir, target string, release releaseInfo) (result string, err error) {
 	versionDir, versionFD, err := ensureManagedVersionDir(cacheDir)
 	if err != nil {
 		return "", p.provisionError(release, target, err)
@@ -171,7 +172,9 @@ func (p Provisioner) provision(cacheDir, target string, release releaseInfo) (st
 	}
 	temporaryName := filepath.Base(temporary)
 	defer func() {
-		_ = removeTreeAt(versionFD, temporaryName)
+		if cleanupErr := removeTreeAt(versionFD, temporaryName); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("cannot clean temporary rootfs: %w", cleanupErr))
+		}
 	}()
 
 	archivePath := filepath.Join(temporary, release.ArchiveName)
@@ -185,6 +188,9 @@ func (p Provisioner) provision(cacheDir, target string, release releaseInfo) (st
 	}
 	if err := extractArchive(archivePath, extracted, defaultExtractionLimits); err != nil {
 		return "", p.provisionError(release, target, err)
+	}
+	if err := os.Remove(archivePath); err != nil {
+		return "", p.provisionError(release, target, fmt.Errorf("cannot remove downloaded archive: %w", err))
 	}
 	if err := validateRootfsLayout(extracted); err != nil {
 		return "", p.provisionError(release, target, err)
@@ -202,7 +208,7 @@ func (p Provisioner) provision(cacheDir, target string, release releaseInfo) (st
 	if err := syncDirectoryPath(extracted, "completed rootfs"); err != nil {
 		return "", p.provisionError(release, target, err)
 	}
-	if err := publishReplacement(versionFD, versionDir, temporaryName, targetName, p.renamePath); err != nil {
+	if err := publishReplacement(versionFD, temporaryName, targetName, p.renamePath); err != nil {
 		return "", p.provisionError(release, target, err)
 	}
 	if err := syncDirectory(versionFD, versionDir); err != nil {
@@ -275,9 +281,6 @@ func (p Provisioner) download(ctx context.Context, release releaseInfo, destinat
 	}
 	if got := hex.EncodeToString(hash.Sum(nil)); got != release.SHA256 {
 		return fmt.Errorf("archive SHA-256 mismatch: got %s, want %s", got, release.SHA256)
-	}
-	if err := file.Sync(); err != nil {
-		return fmt.Errorf("cannot fsync downloaded archive: %v", err)
 	}
 	if err := file.Close(); err != nil {
 		return fmt.Errorf("cannot close downloaded archive: %v", err)
@@ -478,7 +481,7 @@ func syncDirectoryPath(path, label string) error {
 	return syncDirectory(fd, label)
 }
 
-func publishReplacement(versionFD int, versionPath, temporaryName, targetName string, injectedRename func(string, string) error) error {
+func publishReplacement(versionFD int, temporaryName, targetName string, injectedRename func(int, string, int, string, uint) error) error {
 	temporaryFD, err := openDirectoryAt(versionFD, temporaryName)
 	if err != nil {
 		return fmt.Errorf("cannot open temporary rootfs directory without following symlinks: %v", err)
@@ -488,40 +491,23 @@ func publishReplacement(versionFD int, versionPath, temporaryName, targetName st
 	if err != nil {
 		return fmt.Errorf("cannot inspect existing rootfs target: %v", err)
 	}
-	rename := func(fromFD int, fromName string, toFD int, toName string, oldPath, newPath string) error {
+	rename := func(fromFD int, fromName string, toFD int, toName string, flags uint) error {
 		if injectedRename != nil {
-			return injectedRename(oldPath, newPath)
+			return injectedRename(fromFD, fromName, toFD, toName, flags)
 		}
-		return unix.Renameat(fromFD, fromName, toFD, toName)
+		return unix.Renameat2(fromFD, fromName, toFD, toName, flags)
 	}
-	sourceName := filepath.Join(temporaryName, "rootfs")
 	if !old {
-		if err := rename(temporaryFD, "rootfs", versionFD, targetName, filepath.Join(versionPath, sourceName), filepath.Join(versionPath, targetName)); err != nil {
+		if err := rename(temporaryFD, "rootfs", versionFD, targetName, unix.RENAME_NOREPLACE); err != nil {
 			return fmt.Errorf("cannot atomically publish rootfs: %v", err)
 		}
 		return nil
 	}
-
-	var backupName string
-	for attempt := 0; attempt < 8; attempt++ {
-		backupName = fmt.Sprintf(".rootfs-backup-%d-%d", os.Getpid(), time.Now().UnixNano()+int64(attempt))
-		err = rename(versionFD, targetName, versionFD, backupName, filepath.Join(versionPath, targetName), filepath.Join(versionPath, backupName))
-		if err != unix.EEXIST {
-			break
-		}
+	if err := rename(temporaryFD, "rootfs", versionFD, targetName, unix.RENAME_EXCHANGE); err != nil {
+		return fmt.Errorf("cannot atomically replace rootfs: %v", err)
 	}
-	if err != nil {
-		return fmt.Errorf("cannot move existing rootfs to a private backup: %v", err)
-	}
-	if err := rename(temporaryFD, "rootfs", versionFD, targetName, filepath.Join(versionPath, sourceName), filepath.Join(versionPath, targetName)); err != nil {
-		restoreErr := rename(versionFD, backupName, versionFD, targetName, filepath.Join(versionPath, backupName), filepath.Join(versionPath, targetName))
-		if restoreErr != nil {
-			return fmt.Errorf("cannot publish replacement rootfs: %v; cannot restore previous rootfs: %v", err, restoreErr)
-		}
-		return fmt.Errorf("cannot publish replacement rootfs: %v", err)
-	}
-	if err := removeTreeAt(versionFD, backupName); err != nil {
-		return fmt.Errorf("replacement rootfs was published but old backup cleanup failed: %v", err)
+	if err := removeTreeAt(temporaryFD, "rootfs"); err != nil {
+		return fmt.Errorf("cannot remove previous rootfs: %v", err)
 	}
 	return nil
 }
