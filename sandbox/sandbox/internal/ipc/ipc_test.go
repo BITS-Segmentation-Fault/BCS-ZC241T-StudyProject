@@ -1,4 +1,4 @@
-package common
+package ipc
 
 import (
 	"os"
@@ -18,8 +18,8 @@ func TestConfigSnapshotRoundTrip(t *testing.T) {
 	cfg.RootFSSource = "/tmp/rootfs"
 	cfg.FileSizeLimitMB = 4
 	done := make(chan error, 1)
-	go func() { done <- SendConfig(right, cfg); _ = right.Close() }()
-	got, err := ReceiveConfig(left)
+	go func() { done <- WriteConfig(right, cfg); _ = right.Close() }()
+	got, err := ReadConfig(left)
 	_ = left.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestConfigSnapshotRejectsMalformedJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 		_ = right.Close()
-		if _, err := ReceiveConfig(left); err == nil {
+		if _, err := ReadConfig(left); err == nil {
 			t.Errorf("accepted malformed snapshot %q", data)
 		}
 		_ = left.Close()
@@ -61,7 +61,7 @@ func TestConfigSnapshotRejectsInvalidConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = right.Close()
-	if _, err := ReceiveConfig(left); err == nil {
+	if _, err := ReadConfig(left); err == nil {
 		t.Fatal("accepted invalid snapshot configuration")
 	}
 	_ = left.Close()
@@ -77,7 +77,7 @@ func TestConfigSnapshotRejectsOversize(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = right.Close()
-	if _, err := ReceiveConfig(left); err == nil {
+	if _, err := ReadConfig(left); err == nil {
 		t.Fatal("accepted oversized snapshot")
 	}
 	_ = left.Close()

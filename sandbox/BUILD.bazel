@@ -10,6 +10,7 @@ test_suite(
     tests = [
         "//sandbox/sandbox:sandbox_test",
         "//sandbox/sandbox:config_test",
+        "//sandbox/sandbox:ipc_test",
         "//sandbox/sandbox:fs_test",
         "//sandbox/sandbox:network_test",
         "//sandbox/sandbox:parent_test",
