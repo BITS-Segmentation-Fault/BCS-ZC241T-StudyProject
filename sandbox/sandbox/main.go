@@ -12,7 +12,6 @@ import (
 const (
 	internalChildMarker = "--internal-child"
 	childReadFD         = 3
-	childWriteFD        = 4
 )
 
 func main() {
@@ -25,7 +24,7 @@ func main() {
 		if err := validateInternalChild(); err != nil {
 			fatal(err)
 		}
-		os.Exit(child.Child(childReadFD, childWriteFD))
+		os.Exit(child.Child(childReadFD))
 	}
 
 	parsed, err := ParseArgs(publicArgs)
@@ -51,10 +50,8 @@ func validateInternalChild() error {
 	if os.Getpid() != 1 {
 		return fmt.Errorf("internal child invocation requires PID 1 in a new PID namespace")
 	}
-	for _, fd := range []int{childReadFD, childWriteFD} {
-		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err != nil {
-			return fmt.Errorf("internal child descriptor %d is unavailable: %v", fd, err)
-		}
+	if _, err := unix.FcntlInt(uintptr(childReadFD), unix.F_GETFD, 0); err != nil {
+		return fmt.Errorf("internal child descriptor %d is unavailable: %v", childReadFD, err)
 	}
 	return nil
 }

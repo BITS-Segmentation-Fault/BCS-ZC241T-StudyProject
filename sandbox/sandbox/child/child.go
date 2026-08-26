@@ -26,13 +26,9 @@ func childLog(msg string) {
 	_, _ = syscall.Write(1, []byte(fmt.Sprintf("[CHILD DEBUG] %s\n", msg)))
 }
 
-func Child(p2cRFd, c2pWFd int) int {
+func Child(p2cRFd int) int {
 	childLog("Child process entered execution layer.")
 
-	if err := waitForParentSetup(p2cRFd, c2pWFd); err != nil {
-		childLog(fmt.Sprintf("PARENT HANDSHAKE FAILURE: %v", err))
-		return 1
-	}
 	readPipe := os.NewFile(uintptr(p2cRFd), "sandbox-config")
 	cfg, err := common.ReceiveConfig(readPipe)
 	_ = readPipe.Close()
@@ -40,16 +36,6 @@ func Child(p2cRFd, c2pWFd int) int {
 		childLog(fmt.Sprintf("CONFIGURATION FAILURE: %v", err))
 		return 1
 	}
-	if err := cfg.Validate(); err != nil {
-		childLog(fmt.Sprintf("CONFIGURATION FAILURE: %v", err))
-		return 1
-	}
-	if err := security.ValidateSyscallNames(cfg.BlockedSyscalls); err != nil {
-		childLog(fmt.Sprintf("CONFIGURATION FAILURE: %v", err))
-		return 1
-	}
-	_ = unix.Close(c2pWFd)
-
 	if err := resources.ApplyFileSizeLimit(cfg.FileSizeLimitMB); err != nil {
 		childLog(fmt.Sprintf("RESOURCE FAILURE: %v", err))
 		return 1
@@ -165,16 +151,6 @@ func reapUntilPayloadExits(payloadPID int) (syscall.WaitStatus, error) {
 			return status, nil
 		}
 	}
-}
-
-func waitForParentSetup(readFD, writeFD int) error {
-	if readFD <= 0 || writeFD <= 0 {
-		return fmt.Errorf("invalid fixed handshake descriptors")
-	}
-	if _, err := unix.Write(writeFD, []byte{common.ReadyByte}); err != nil {
-		return fmt.Errorf("send READY: %v", err)
-	}
-	return nil
 }
 
 func dropCapabilities(requested []string) error {

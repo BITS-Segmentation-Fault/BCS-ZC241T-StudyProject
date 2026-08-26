@@ -3,14 +3,12 @@
 package parent
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"sandbox/sandbox/common"
 	"sandbox/sandbox/config"
@@ -19,8 +17,6 @@ import (
 	"sandbox/sandbox/rootfs"
 	"sandbox/sandbox/security"
 )
-
-const childReadyTimeout = 10 * time.Second
 
 func Parent(cfg config.Config) int {
 	if err := cfg.Validate(); err != nil {
@@ -38,14 +34,6 @@ func Parent(cfg config.Config) int {
 		return 1
 	}
 	cfg.RootFSSource = resolvedRootFS
-	if err := cfg.Validate(); err != nil {
-		log.Printf("[PRE-FLIGHT ERROR] resolved configuration is invalid: %v", err)
-		return 1
-	}
-	if err := security.ValidateSyscallNames(cfg.BlockedSyscalls); err != nil {
-		log.Printf("[PRE-FLIGHT ERROR] resolved syscall policy is invalid: %v", err)
-		return 1
-	}
 	resourceLimits, err := resources.PrepareResourceLimits(cfg.CPULimitPercent, cfg.MemoryLimitGB, cfg.MaxProcesses)
 	if err != nil {
 		log.Printf("[PRE-FLIGHT ERROR] resource limits cannot be provisioned: %v", err)
@@ -76,19 +64,12 @@ func Parent(cfg config.Config) int {
 		cleanupBridge(bridgeState)
 		return 1
 	}
-	c2pR, c2pW, err := os.Pipe()
-	if err != nil {
-		closeFiles(p2cR, p2cW)
-		cleanupBridge(bridgeState)
-		return 1
-	}
-
 	cmd := exec.Command("/proc/self/exe", "--internal-child")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Env = internalChildEnvironment(cfg.EnvVars)
-	cmd.ExtraFiles = []*os.File{p2cR, c2pW}
+	cmd.ExtraFiles = []*os.File{p2cR}
 
 	cloneFlags := uintptr(syscall.CLONE_NEWUSER | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS | syscall.CLONE_NEWUTS)
 	if cfg.NetworkMode.RequiresNetNS() {
@@ -104,25 +85,17 @@ func Parent(cfg config.Config) int {
 	}
 
 	if err := cmd.Start(); err != nil {
-		closeFiles(p2cR, p2cW, c2pR, c2pW)
+		closeFiles(p2cR, p2cW)
 		cleanupBridge(bridgeState)
 		log.Printf("[PRE-FLIGHT ERROR] cannot start isolated child: %v", err)
 		return 1
 	}
 
-	// The parent retains only the write-to-child and read-from-child ends.
-	closeFiles(p2cR, c2pW)
-	if err := waitForReady(c2pR); err != nil {
-		terminateChild(cmd)
-		closeFiles(p2cW, c2pR)
-		cleanupBridge(bridgeState)
-		log.Printf("[SANDBOX] child readiness failed: %v", err)
-		return 1
-	}
+	closeFiles(p2cR)
 
 	if err := resourceLimits.Attach(cmd.Process.Pid); err != nil {
 		terminateChild(cmd)
-		closeFiles(p2cW, c2pR)
+		closeFiles(p2cW)
 		cleanupBridge(bridgeState)
 		log.Printf("[RESOURCE] CPU cgroup setup failed: %v", err)
 		return 1
@@ -131,7 +104,7 @@ func Parent(cfg config.Config) int {
 	if cfg.NetworkMode == network.Bridge {
 		if err := network.MoveVethToChild(bridgeState, cmd.Process.Pid); err != nil {
 			terminateChild(cmd)
-			closeFiles(p2cW, c2pR)
+			closeFiles(p2cW)
 			cleanupBridge(bridgeState)
 			log.Printf("[NETWORK] moving veth failed: %v", err)
 			return 1
@@ -140,28 +113,13 @@ func Parent(cfg config.Config) int {
 
 	if err := common.SendConfig(p2cW, cfg); err != nil {
 		terminateChild(cmd)
-		closeFiles(p2cW, c2pR)
+		closeFiles(p2cW)
 		cleanupBridge(bridgeState)
 		log.Printf("[SANDBOX] configuration snapshot failed: %v", err)
 		return 1
 	}
-	closeFiles(p2cW, c2pR)
+	closeFiles(p2cW)
 	return waitForChild(cmd, bridgeState, cfg)
-}
-
-func waitForReady(file *os.File) error {
-	defer file.SetReadDeadline(time.Time{})
-	if err := file.SetReadDeadline(time.Now().Add(childReadyTimeout)); err != nil {
-		return err
-	}
-	ready := make([]byte, 1)
-	if _, err := file.Read(ready); err != nil {
-		return err
-	}
-	if ready[0] != common.ReadyByte {
-		return fmt.Errorf("unexpected readiness byte %q", ready[0])
-	}
-	return nil
 }
 
 func waitForChild(cmd *exec.Cmd, state *network.BridgeState, cfg config.Config) int {

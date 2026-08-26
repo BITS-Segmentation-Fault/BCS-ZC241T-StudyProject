@@ -10,10 +10,7 @@ import (
 	"sandbox/sandbox/config"
 )
 
-const (
-	ReadyByte       byte = 'R'
-	MaxSnapshotSize      = 1 << 20
-)
+const MaxSnapshotSize = 1 << 20
 
 func SendConfig(file *os.File, cfg config.Config) error {
 	data, err := json.Marshal(cfg)
