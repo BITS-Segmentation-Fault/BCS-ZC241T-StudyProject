@@ -2,10 +2,14 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func main() {
@@ -32,5 +36,146 @@ func main() {
 			}
 			fmt.Printf("read=%s\n", data)
 		}
+		if arg == "--capabilities" {
+			printCapabilityStatus()
+		}
+		if strings.HasPrefix(arg, "--syscall=") {
+			probeSyscall(strings.TrimPrefix(arg, "--syscall="))
+		}
+		if strings.HasPrefix(arg, "--tcp=") {
+			probeTCP(strings.TrimPrefix(arg, "--tcp="))
+		}
+		if strings.HasPrefix(arg, "--udp=") {
+			probeUDP(strings.TrimPrefix(arg, "--udp="))
+		}
+		if strings.HasPrefix(arg, "--dns=") {
+			probeDNS(strings.TrimPrefix(arg, "--dns="))
+		}
+		if strings.HasPrefix(arg, "--write-bytes=") {
+			probeWrite(strings.TrimPrefix(arg, "--write-bytes="))
+		}
+		if strings.HasPrefix(arg, "--spawn-processes=") {
+			probeProcesses(strings.TrimPrefix(arg, "--spawn-processes="))
+		}
 	}
+}
+
+func printCapabilityStatus() {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		fmt.Printf("status-error=%v\n", err)
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "CapEff:") || strings.HasPrefix(line, "CapPrm:") ||
+			strings.HasPrefix(line, "CapInh:") || strings.HasPrefix(line, "CapAmb:") ||
+			strings.HasPrefix(line, "CapBnd:") {
+			fmt.Println(line)
+		}
+	}
+}
+
+func probeSyscall(name string) {
+	numbers := map[string]uintptr{
+		"mount":  unix.SYS_MOUNT,
+		"reboot": unix.SYS_REBOOT,
+		"ptrace": unix.SYS_PTRACE,
+		"swapon": unix.SYS_SWAPON,
+		"syslog": unix.SYS_SYSLOG,
+	}
+	number, ok := numbers[name]
+	if !ok {
+		fmt.Printf("syscall-error=unknown syscall %s\n", name)
+		return
+	}
+	_, _, errno := unix.Syscall6(number, 0, 0, 0, 0, 0, 0)
+	if errno != 0 {
+		fmt.Printf("syscall-error=%s\n", errno)
+		return
+	}
+	fmt.Println("syscall-ok")
+}
+
+func probeTCP(address string) {
+	connection, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
+	if err != nil {
+		fmt.Printf("tcp-error=%v\n", err)
+		return
+	}
+	_ = connection.Close()
+	fmt.Println("tcp-ok")
+}
+
+func probeUDP(address string) {
+	connection, err := net.DialTimeout("udp", address, 500*time.Millisecond)
+	if err != nil {
+		fmt.Printf("udp-error=%v\n", err)
+		return
+	}
+	_, err = connection.Write([]byte("probe"))
+	_ = connection.Close()
+	if err != nil {
+		fmt.Printf("udp-error=%v\n", err)
+		return
+	}
+	fmt.Println("udp-ok")
+}
+
+func probeDNS(name string) {
+	addresses, err := net.LookupHost(name)
+	if err != nil {
+		fmt.Printf("dns-error=%v\n", err)
+		return
+	}
+	fmt.Printf("dns-ok=%s\n", strings.Join(addresses, ","))
+}
+
+func probeWrite(spec string) {
+	path, sizeText, ok := strings.Cut(spec, ":")
+	if !ok {
+		fmt.Printf("write-error=invalid specification\n")
+		return
+	}
+	size, err := strconv.Atoi(sizeText)
+	if err != nil || size < 0 {
+		fmt.Printf("write-error=invalid size\n")
+		return
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		fmt.Printf("write-error=%v\n", err)
+		return
+	}
+	defer file.Close()
+	_, err = file.Write(make([]byte, size))
+	if err != nil {
+		fmt.Printf("write-error=%v\n", err)
+		return
+	}
+	fmt.Println("write-ok")
+}
+
+func probeProcesses(countText string) {
+	count, err := strconv.Atoi(countText)
+	if err != nil || count < 0 {
+		fmt.Println("process-error=invalid count")
+		return
+	}
+	children := make([]*exec.Cmd, 0, count)
+	for i := 0; i < count; i++ {
+		child := exec.Command(os.Args[0], "--sleep=5")
+		if err := child.Start(); err != nil {
+			fmt.Printf("process-error=%v\n", err)
+			for _, running := range children {
+				_ = running.Process.Kill()
+			}
+			return
+		}
+		children = append(children, child)
+	}
+	for _, child := range children {
+		_ = child.Process.Kill()
+		_ = child.Wait()
+	}
+	fmt.Println("process-ok")
 }
