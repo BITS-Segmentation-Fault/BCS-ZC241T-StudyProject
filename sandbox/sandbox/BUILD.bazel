@@ -129,6 +129,7 @@ go_binary(
 go_binary(
     name = "testprobe",
     srcs = ["testprobe/main.go"],
+    deps = ["@org_golang_x_sys//unix:go_default_library"],
 )
 
 go_test(
