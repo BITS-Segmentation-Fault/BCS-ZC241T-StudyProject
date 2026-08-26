@@ -39,17 +39,13 @@ go_library(
     name = "idmap",
     srcs = ["idmap/idmap.go"],
     importpath = "sandbox/sandbox/idmap",
-    deps = [":fs"],
 )
 
 go_library(
     name = "diag",
     srcs = ["diag/diag.go"],
     importpath = "sandbox/sandbox/diag",
-    deps = [
-        ":fs",
-        ":utils",
-    ],
+    deps = [":utils"],
 )
 
 go_library(

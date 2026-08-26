@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-
-	"sandbox/sandbox/fs"
 )
 
 type IDRange struct {
@@ -105,7 +103,7 @@ func WriteIDMaps(childPID, hostUID, hostGID int) error {
 
 	setGroupsPath := filepath.Join(procPath, "setgroups")
 	if _, err := os.Stat(setGroupsPath); err == nil {
-		if err := fs.WriteText(setGroupsPath, "deny\n"); err != nil {
+		if err := os.WriteFile(setGroupsPath, []byte("deny\n"), 0644); err != nil {
 			return fmt.Errorf("failed to write %s: %v", setGroupsPath, err)
 		}
 	}
