@@ -5,9 +5,12 @@ package resources
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 type fakeCgroupFileSystem struct {
@@ -19,6 +22,8 @@ type fakeCgroupFileSystem struct {
 	mkdirErr    error
 	writeErrors map[string]error
 	removeErrs  []error
+	statfsType  int64
+	missing     map[string]bool
 }
 
 func newFakeCgroupFileSystem() *fakeCgroupFileSystem {
@@ -26,6 +31,8 @@ func newFakeCgroupFileSystem() *fakeCgroupFileSystem {
 		files:       make(map[string][]byte),
 		writes:      make(map[string][]byte),
 		writeErrors: make(map[string]error),
+		statfsType:  int64(unix.CGROUP2_SUPER_MAGIC),
+		missing:     make(map[string]bool),
 	}
 }
 
@@ -43,13 +50,15 @@ func (f *fakeCgroupFileSystem) MkdirTemp(parent, pattern string) (string, error)
 		return "", f.mkdirErr
 	}
 	f.lastCgroup = filepath.Join(parent, pattern+"test")
-	for _, name := range []string{"cpu.max", "memory.max", "pids.max", "cgroup.procs"} {
-		f.files[filepath.Join(f.lastCgroup, name)] = nil
+	for _, name := range []string{"cpu.max", "memory.max", "memory.swap.max", "memory.oom.group", "pids.max", "cgroup.procs"} {
+		if !f.missing[name] {
+			f.files[filepath.Join(f.lastCgroup, name)] = nil
+		}
 	}
 	return f.lastCgroup, nil
 }
 
-func (f *fakeCgroupFileSystem) WriteFile(path string, data []byte) error {
+func (f *fakeCgroupFileSystem) WriteExistingFile(path string, data []byte) error {
 	if err := f.writeErrors[filepath.Base(path)]; err != nil {
 		return err
 	}
@@ -59,6 +68,10 @@ func (f *fakeCgroupFileSystem) WriteFile(path string, data []byte) error {
 	f.writes[path] = append([]byte(nil), data...)
 	f.files[path] = append([]byte(nil), data...)
 	return nil
+}
+
+func (f *fakeCgroupFileSystem) Statfs(string) (int64, error) {
+	return f.statfsType, nil
 }
 
 func (f *fakeCgroupFileSystem) Remove(path string) error {
@@ -128,9 +141,11 @@ func TestPrepareResourceLimitsConfiguresAggregateControllers(t *testing.T) {
 		t.Fatalf("prepared cgroup = %#v, want child of %q", limit, delegatedPath)
 	}
 	for path, want := range map[string]string{
-		filepath.Join(limit.path, "cpu.max"):    "25000 100000\n",
-		filepath.Join(limit.path, "memory.max"): "2147483648\n",
-		filepath.Join(limit.path, "pids.max"):   "17\n",
+		filepath.Join(limit.path, "cpu.max"):          "25000 100000\n",
+		filepath.Join(limit.path, "memory.max"):       "2147483648\n",
+		filepath.Join(limit.path, "pids.max"):         "17\n",
+		filepath.Join(limit.path, "memory.swap.max"):  "0\n",
+		filepath.Join(limit.path, "memory.oom.group"): "1\n",
 	} {
 		if got := string(fake.writes[path]); got != want {
 			t.Errorf("write %s = %q, want %q", path, got, want)
@@ -194,5 +209,119 @@ func TestResourceLimitsRollbackJoinsCleanupFailure(t *testing.T) {
 	_, err := prepareResourceLimits(50, 0, 0, procPath, mountPath, fake)
 	if err == nil || !strings.Contains(err.Error(), "configure failed") || !strings.Contains(err.Error(), "cleanup failed") {
 		t.Fatalf("prepareResourceLimits() error = %v, want both failures", err)
+	}
+}
+
+func TestPrepareResourceLimitsRejectsNonCgroupFilesystem(t *testing.T) {
+	fake := newFakeCgroupFileSystem()
+	fake.statfsType = 0
+	procPath, mountPath, _ := seedDelegatedHierarchy(fake)
+	if _, err := prepareResourceLimits(50, 0, 0, procPath, mountPath, fake); err == nil || !strings.Contains(err.Error(), "not on a cgroup-v2 filesystem") {
+		t.Fatalf("prepareResourceLimits() error = %v, want non-cgroup filesystem error", err)
+	}
+	if fake.lastCgroup != "" {
+		t.Fatal("created a child cgroup on a non-cgroup filesystem")
+	}
+}
+
+func TestWriteExistingFileDoesNotCreateMissingControl(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cpu.max")
+	if err := (osCgroupFileSystem{}).WriteExistingFile(path, []byte("1 100000\n")); err == nil {
+		t.Fatal("WriteExistingFile() unexpectedly created a missing control file")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("missing control file stat error = %v, want absent", err)
+	}
+}
+
+func TestPrepareResourceLimitsRejectsUnavailableControllers(t *testing.T) {
+	tests := []struct {
+		name, controller, source string
+	}{
+		{"cpu available list", "cpu", "controllers"},
+		{"cpu delegated list", "cpu", "subtree_control"},
+		{"memory available list", "memory", "controllers"},
+		{"memory delegated list", "memory", "subtree_control"},
+		{"pids available list", "pids", "controllers"},
+		{"pids delegated list", "pids", "subtree_control"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := newFakeCgroupFileSystem()
+			procPath, mountPath, delegated := seedDelegatedHierarchy(fake)
+			path := filepath.Join(delegated, "cgroup."+tt.source)
+			contents := strings.Fields(string(fake.files[path]))
+			filtered := contents[:0]
+			for _, controller := range contents {
+				if controller != tt.controller {
+					filtered = append(filtered, controller)
+				}
+			}
+			fake.files[path] = []byte(strings.Join(filtered, " ") + "\n")
+			values := map[string][3]int{
+				"cpu": {1, 0, 0}, "memory": {0, 1, 0}, "pids": {0, 0, 1},
+			}
+			value := values[tt.controller]
+			if _, err := prepareResourceLimits(value[0], value[1], value[2], procPath, mountPath, fake); err == nil || !strings.Contains(err.Error(), tt.controller+" controller") {
+				t.Fatalf("prepareResourceLimits() error = %v, want unavailable %s controller", err, tt.controller)
+			}
+		})
+	}
+}
+
+func TestPrepareResourceLimitsFailsWhenControlFileIsUnavailable(t *testing.T) {
+	for _, name := range []string{"cpu.max", "memory.max", "memory.swap.max", "memory.oom.group", "pids.max"} {
+		t.Run(name, func(t *testing.T) {
+			fake := newFakeCgroupFileSystem()
+			fake.missing[name] = true
+			procPath, mountPath, _ := seedDelegatedHierarchy(fake)
+			cpu, memory, pids := 0, 0, 0
+			if name == "cpu.max" {
+				cpu = 1
+			}
+			if strings.HasPrefix(name, "memory.") {
+				memory = 1
+			}
+			if name == "pids.max" {
+				pids = 1
+			}
+			_, err := prepareResourceLimits(cpu, memory, pids, procPath, mountPath, fake)
+			if err == nil {
+				t.Fatalf("prepareResourceLimits() unexpectedly succeeded without %s", name)
+			}
+			if len(fake.removed) != 1 {
+				t.Fatalf("partial cgroup cleanup removals = %v, want one", fake.removed)
+			}
+			if _, ok := fake.files[filepath.Join(fake.lastCgroup, name)]; ok {
+				t.Fatalf("missing control file %s was created", name)
+			}
+		})
+	}
+}
+
+func TestPrepareResourceLimitsFailsWhenControlWriteFails(t *testing.T) {
+	for _, name := range []string{"cpu.max", "memory.max", "memory.swap.max", "memory.oom.group", "pids.max"} {
+		t.Run(name, func(t *testing.T) {
+			fake := newFakeCgroupFileSystem()
+			fake.writeErrors[name] = errors.New("control write denied")
+			procPath, mountPath, _ := seedDelegatedHierarchy(fake)
+			cpu, memory, pids := 0, 0, 0
+			if name == "cpu.max" {
+				cpu = 1
+			}
+			if strings.HasPrefix(name, "memory.") {
+				memory = 1
+			}
+			if name == "pids.max" {
+				pids = 1
+			}
+			if _, err := prepareResourceLimits(cpu, memory, pids, procPath, mountPath, fake); err == nil {
+				t.Fatalf("prepareResourceLimits() unexpectedly succeeded with %s failure", name)
+			}
+			if len(fake.removed) != 1 {
+				t.Fatalf("partial cgroup cleanup removals = %v, want one", fake.removed)
+			}
+		})
 	}
 }

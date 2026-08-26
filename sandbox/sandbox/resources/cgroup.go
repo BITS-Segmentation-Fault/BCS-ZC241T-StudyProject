@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -27,8 +29,9 @@ const (
 type cgroupFileSystem interface {
 	ReadFile(string) ([]byte, error)
 	MkdirTemp(string, string) (string, error)
-	WriteFile(string, []byte) error
+	WriteExistingFile(string, []byte) error
 	Remove(string) error
+	Statfs(string) (int64, error)
 }
 
 type osCgroupFileSystem struct{}
@@ -41,12 +44,32 @@ func (osCgroupFileSystem) MkdirTemp(dir, pattern string) (string, error) {
 	return os.MkdirTemp(dir, pattern)
 }
 
-func (osCgroupFileSystem) WriteFile(path string, data []byte) error {
-	return os.WriteFile(path, data, 0600)
+func (osCgroupFileSystem) WriteExistingFile(path string, data []byte) error {
+	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(fd)
+	n, err := unix.Write(fd, data)
+	if err != nil {
+		return err
+	}
+	if n != len(data) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 func (osCgroupFileSystem) Remove(path string) error {
 	return os.Remove(path)
+}
+
+func (osCgroupFileSystem) Statfs(path string) (int64, error) {
+	var stat unix.Statfs_t
+	if err := unix.Statfs(path, &stat); err != nil {
+		return 0, err
+	}
+	return stat.Type, nil
 }
 
 // ResourceLimits owns a prepared cgroup-v2 hierarchy for the sandbox's
@@ -90,6 +113,13 @@ func prepareResourceLimits(cpuPercent, memoryGB, maxProcesses int, procPath, mou
 	delegatedPath, err := resolveDelegatedCgroupPath(mountPath, relativePath)
 	if err != nil {
 		return nil, err
+	}
+	filesystemType, err := filesystem.Statfs(delegatedPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot inspect delegated cgroup filesystem: %w", err)
+	}
+	if filesystemType != int64(unix.CGROUP2_SUPER_MAGIC) {
+		return nil, fmt.Errorf("delegated path is not on a cgroup-v2 filesystem")
 	}
 
 	controllers, err := filesystem.ReadFile(filepath.Join(delegatedPath, "cgroup.controllers"))
@@ -197,8 +227,8 @@ func (limit *ResourceLimits) configureQuota(percent int) error {
 	if quota <= 0 {
 		return fmt.Errorf("cpu limit percent must be greater than zero")
 	}
-	if err := limit.filesystem.WriteFile(filepath.Join(limit.path, "cpu.max"), []byte(fmt.Sprintf("%d %d\n", quota, cgroupCPUPeriod))); err != nil {
-		return fmt.Errorf("cannot configure CPU quota: %v", err)
+	if err := limit.filesystem.WriteExistingFile(filepath.Join(limit.path, "cpu.max"), []byte(fmt.Sprintf("%d %d\n", quota, cgroupCPUPeriod))); err != nil {
+		return fmt.Errorf("cannot configure CPU quota: %w", err)
 	}
 	return nil
 }
@@ -214,13 +244,19 @@ func (limit *ResourceLimits) configure(cpuPercent, memoryGB, maxProcesses int) e
 			return fmt.Errorf("memory limit overflows the kernel limit")
 		}
 		memoryBytes := uint64(memoryGB) * gbToBytes
-		if err := limit.filesystem.WriteFile(filepath.Join(limit.path, "memory.max"), []byte(strconv.FormatUint(memoryBytes, 10)+"\n")); err != nil {
-			return fmt.Errorf("cannot configure memory limit: %v", err)
+		if err := limit.filesystem.WriteExistingFile(filepath.Join(limit.path, "memory.max"), []byte(strconv.FormatUint(memoryBytes, 10)+"\n")); err != nil {
+			return fmt.Errorf("cannot configure memory limit: %w", err)
+		}
+		if err := limit.filesystem.WriteExistingFile(filepath.Join(limit.path, "memory.swap.max"), []byte("0\n")); err != nil {
+			return fmt.Errorf("cannot disable memory swap: %w", err)
+		}
+		if err := limit.filesystem.WriteExistingFile(filepath.Join(limit.path, "memory.oom.group"), []byte("1\n")); err != nil {
+			return fmt.Errorf("cannot configure memory OOM handling: %w", err)
 		}
 	}
 	if maxProcesses > 0 {
-		if err := limit.filesystem.WriteFile(filepath.Join(limit.path, "pids.max"), []byte(strconv.Itoa(maxProcesses)+"\n")); err != nil {
-			return fmt.Errorf("cannot configure process limit: %v", err)
+		if err := limit.filesystem.WriteExistingFile(filepath.Join(limit.path, "pids.max"), []byte(strconv.Itoa(maxProcesses)+"\n")); err != nil {
+			return fmt.Errorf("cannot configure process limit: %w", err)
 		}
 	}
 	return nil
@@ -234,8 +270,8 @@ func (limit *ResourceLimits) Attach(pid int) error {
 	if pid <= 0 {
 		return fmt.Errorf("cannot attach invalid child PID %d to resource cgroup", pid)
 	}
-	if err := limit.filesystem.WriteFile(filepath.Join(limit.path, "cgroup.procs"), []byte(strconv.Itoa(pid)+"\n")); err != nil {
-		return fmt.Errorf("cannot attach child to resource cgroup: %v", err)
+	if err := limit.filesystem.WriteExistingFile(filepath.Join(limit.path, "cgroup.procs"), []byte(strconv.Itoa(pid)+"\n")); err != nil {
+		return fmt.Errorf("cannot attach child to resource cgroup: %w", err)
 	}
 	return nil
 }
