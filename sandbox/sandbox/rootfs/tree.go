@@ -35,10 +35,10 @@ func treeDigest(root string) (string, error) {
 }
 
 func treeDigestFD(rootFD int) (string, error) {
-	return treeDigestFDWithLimits(rootFD, defaultExtractionLimits)
+	return treeDigestFDWithLimits(rootFD, defaultRootfsLimits)
 }
 
-func treeDigestFDWithLimits(rootFD int, limits extractionLimits) (string, error) {
+func treeDigestFDWithLimits(rootFD int, limits rootfsLimits) (string, error) {
 	digest := sha256.New()
 	_, _ = digest.Write([]byte(treeDigestVersion))
 	if err := walkTree(rootFD, "", digest, new(int64), new(int), limits); err != nil {
@@ -47,7 +47,7 @@ func treeDigestFDWithLimits(rootFD int, limits extractionLimits) (string, error)
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
-func walkTree(directoryFD int, relative string, digest hash.Hash, extractedBytes *int64, entryCount *int, limits extractionLimits) error {
+func walkTree(directoryFD int, relative string, digest hash.Hash, extractedBytes *int64, entryCount *int, limits rootfsLimits) error {
 	remaining := limits.MaxEntries - *entryCount
 	if relative == "" {
 		remaining++ // The project-written manifest is excluded from the digest.
@@ -136,12 +136,12 @@ func writeDigestBytes(digest hash.Hash, value []byte) {
 	_, _ = digest.Write(value)
 }
 
-func hashRegularFile(fd int, name string, size int64, extractedBytes *int64, digest hash.Hash, limits extractionLimits) error {
+func hashRegularFile(fd int, name string, size int64, extractedBytes *int64, digest hash.Hash, limits rootfsLimits) error {
 	if size < 0 || size > limits.MaxFileBytes {
 		return fmt.Errorf("rootfs file %q exceeds the %d-byte file limit", name, limits.MaxFileBytes)
 	}
-	if *extractedBytes > limits.MaxExtractedBytes-size {
-		return fmt.Errorf("rootfs tree exceeds the %d-byte extracted-data limit", limits.MaxExtractedBytes)
+	if *extractedBytes > limits.MaxTotalBytes-size {
+		return fmt.Errorf("rootfs tree exceeds the %d-byte extracted-data limit", limits.MaxTotalBytes)
 	}
 	duplicate, err := unix.Dup(fd)
 	if err != nil {

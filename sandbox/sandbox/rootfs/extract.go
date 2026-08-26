@@ -15,35 +15,28 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type extractionLimits struct {
-	MaxCompressedBytes int64
-	MaxExtractedBytes  int64
-	MaxFileBytes       int64
-	MaxEntries         int
+// rootfsLimits bounds extracted and cached trees independently of archive size.
+type rootfsLimits struct {
+	MaxTotalBytes int64
+	MaxFileBytes  int64
+	MaxEntries    int
 }
 
-var defaultExtractionLimits = extractionLimits{
-	MaxCompressedBytes: 4023732,
-	MaxExtractedBytes:  512 << 20,
-	MaxFileBytes:       128 << 20,
-	MaxEntries:         100000,
+// defaultRootfsLimits is the shared resource-exhaustion policy for trees.
+var defaultRootfsLimits = rootfsLimits{
+	MaxTotalBytes: 512 << 20,
+	MaxFileBytes:  128 << 20,
+	MaxEntries:    100000,
 }
 
-func extractArchive(archivePath, destination string, limits extractionLimits) error {
-	archiveInfo, err := os.Stat(archivePath)
-	if err != nil {
-		return fmt.Errorf("cannot inspect rootfs archive: %v", err)
-	}
-	if archiveInfo.Size() > limits.MaxCompressedBytes {
-		return fmt.Errorf("rootfs archive exceeds the %d-byte compressed-data limit", limits.MaxCompressedBytes)
-	}
+func extractArchive(archivePath, destination string, limits rootfsLimits) error {
 	archive, err := os.Open(archivePath)
 	if err != nil {
 		return fmt.Errorf("cannot open rootfs archive: %v", err)
 	}
 	defer archive.Close()
 
-	compressed, err := gzip.NewReader(io.LimitReader(archive, limits.MaxCompressedBytes+1))
+	compressed, err := gzip.NewReader(archive)
 	if err != nil {
 		return fmt.Errorf("cannot read rootfs gzip stream: %v", err)
 	}
@@ -97,8 +90,8 @@ func extractArchive(archivePath, destination string, limits extractionLimits) er
 			if header.Size < 0 || header.Size > limits.MaxFileBytes {
 				return fmt.Errorf("rootfs file %q exceeds the %d-byte file limit", name, limits.MaxFileBytes)
 			}
-			if extractedBytes > limits.MaxExtractedBytes-header.Size {
-				return fmt.Errorf("rootfs archive exceeds the %d-byte extracted-data limit", limits.MaxExtractedBytes)
+			if extractedBytes > limits.MaxTotalBytes-header.Size {
+				return fmt.Errorf("rootfs archive exceeds the %d-byte extracted-data limit", limits.MaxTotalBytes)
 			}
 			if err := extractRegularFile(destination, name, header.Mode, header.Size, reader); err != nil {
 				return err

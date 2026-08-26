@@ -33,36 +33,33 @@ const (
 	requestTimeout   = 45 * time.Second
 	connectTimeout   = 10 * time.Second
 	maxManifestBytes = 4 << 10
+	// This bound applies only to transient downloads, before archive hashing.
+	maxManagedArchiveBytes int64 = 64 << 20
 )
 
 // releaseInfo contains the reviewed metadata for one pinned Alpine archive.
-// MaxArchiveBytes is both the compressed-response limit and the reviewed
-// archive-size ceiling.
 type releaseInfo struct {
-	AlpineArch      string
-	ArchiveName     string
-	URL             string
-	SHA256          string
-	TreeSHA256      string
-	MaxArchiveBytes int64
+	AlpineArch  string
+	ArchiveName string
+	URL         string
+	SHA256      string
+	TreeSHA256  string
 }
 
 var releaseCatalog = map[string]releaseInfo{
 	"amd64": {
-		AlpineArch:      "x86_64",
-		ArchiveName:     "alpine-minirootfs-3.24.1-x86_64.tar.gz",
-		URL:             "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz",
-		SHA256:          "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
-		TreeSHA256:      "f35a4d7394df512b1727eebe935f54cc38a4b15154e56ad74722cb3683c4eb9f",
-		MaxArchiveBytes: 3698422,
+		AlpineArch:  "x86_64",
+		ArchiveName: "alpine-minirootfs-3.24.1-x86_64.tar.gz",
+		URL:         "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz",
+		SHA256:      "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
+		TreeSHA256:  "f35a4d7394df512b1727eebe935f54cc38a4b15154e56ad74722cb3683c4eb9f",
 	},
 	"arm64": {
-		AlpineArch:      "aarch64",
-		ArchiveName:     "alpine-minirootfs-3.24.1-aarch64.tar.gz",
-		URL:             "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz",
-		SHA256:          "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
-		TreeSHA256:      "d685f267ee308d816da007134d44d1e661b4a69ca81ede67b19381eeb25dbb66",
-		MaxArchiveBytes: 4023732,
+		AlpineArch:  "aarch64",
+		ArchiveName: "alpine-minirootfs-3.24.1-aarch64.tar.gz",
+		URL:         "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz",
+		SHA256:      "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
+		TreeSHA256:  "d685f267ee308d816da007134d44d1e661b4a69ca81ede67b19381eeb25dbb66",
 	},
 }
 
@@ -75,10 +72,11 @@ type Provisioner struct {
 
 	// releases is intentionally private: tests replace the catalog with small
 	// synthetic archives, while production always uses releaseCatalog above.
-	releases      map[string]releaseInfo
-	makeTemp      func(string, string) (string, error)
-	renamePath    func(int, string, int, string, uint) error
-	allowTestURLs bool
+	releases        map[string]releaseInfo
+	maxArchiveBytes int64
+	makeTemp        func(string, string) (string, error)
+	renamePath      func(int, string, int, string, uint) error
+	allowTestURLs   bool
 }
 
 func releaseInfoFor(goArch string) (releaseInfo, error) {
@@ -186,7 +184,7 @@ func (p Provisioner) provision(cacheDir, target string, release releaseInfo) (re
 	if err := os.Mkdir(extracted, 0700); err != nil {
 		return "", p.provisionError(release, target, fmt.Errorf("cannot create extraction directory: %v", err))
 	}
-	if err := extractArchive(archivePath, extracted, defaultExtractionLimits); err != nil {
+	if err := extractArchive(archivePath, extracted, defaultRootfsLimits); err != nil {
 		return "", p.provisionError(release, target, err)
 	}
 	if err := os.Remove(archivePath); err != nil {
@@ -254,8 +252,12 @@ func (p Provisioner) download(ctx context.Context, release releaseInfo, destinat
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("download returned HTTP status %s", response.Status)
 	}
-	if response.ContentLength > release.MaxArchiveBytes {
-		return fmt.Errorf("download exceeds the %d-byte archive limit", release.MaxArchiveBytes)
+	archiveLimit := p.maxArchiveBytes
+	if archiveLimit <= 0 {
+		archiveLimit = maxManagedArchiveBytes
+	}
+	if response.ContentLength > archiveLimit {
+		return fmt.Errorf("download exceeds the %d-byte download limit", archiveLimit)
 	}
 
 	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
@@ -271,13 +273,13 @@ func (p Provisioner) download(ctx context.Context, release releaseInfo, destinat
 	}()
 
 	hash := sha256.New()
-	limited := io.LimitReader(response.Body, release.MaxArchiveBytes+1)
+	limited := io.LimitReader(response.Body, archiveLimit+1)
 	count, err := io.Copy(file, io.TeeReader(limited, hash))
 	if err != nil {
 		return fmt.Errorf("cannot save downloaded archive: %v", err)
 	}
-	if count > release.MaxArchiveBytes {
-		return fmt.Errorf("download exceeds the %d-byte archive limit", release.MaxArchiveBytes)
+	if count > archiveLimit {
+		return fmt.Errorf("download exceeds the %d-byte download limit", archiveLimit)
 	}
 	if got := hex.EncodeToString(hash.Sum(nil)); got != release.SHA256 {
 		return fmt.Errorf("archive SHA-256 mismatch: got %s, want %s", got, release.SHA256)
