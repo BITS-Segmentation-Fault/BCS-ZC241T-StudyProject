@@ -45,14 +45,14 @@ func Parent(cfg config.Config) int {
 		log.Printf("[PRE-FLIGHT ERROR] resolved syscall policy is invalid: %v", err)
 		return 1
 	}
-	cpuLimit, err := resources.PrepareCPULimit(cfg.CPULimitPercent)
+	resourceLimits, err := resources.PrepareResourceLimits(cfg.CPULimitPercent, cfg.MemoryLimitGB, cfg.MaxProcesses)
 	if err != nil {
-		log.Printf("[PRE-FLIGHT ERROR] CPU limit cannot be provisioned: %v", err)
+		log.Printf("[PRE-FLIGHT ERROR] resource limits cannot be provisioned: %v", err)
 		return 1
 	}
 	defer func() {
-		if err := cpuLimit.Cleanup(); err != nil {
-			log.Printf("[RESOURCE] CPU cgroup cleanup failed: %v", err)
+		if err := resourceLimits.Cleanup(); err != nil {
+			log.Printf("[RESOURCE] cgroup cleanup failed: %v", err)
 		}
 	}()
 	var bridgeState *network.BridgeState
@@ -119,7 +119,7 @@ func Parent(cfg config.Config) int {
 		return 1
 	}
 
-	if err := cpuLimit.Attach(cmd.Process.Pid); err != nil {
+	if err := resourceLimits.Attach(cmd.Process.Pid); err != nil {
 		terminateChild(cmd)
 		closeFiles(p2cW, c2pR)
 		cleanupBridge(bridgeState, cfg)

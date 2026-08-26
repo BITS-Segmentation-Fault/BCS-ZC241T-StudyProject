@@ -22,8 +22,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const gbToBytes = 1024 * 1024 * 1024
-
 func childLog(msg string) {
 	_, _ = syscall.Write(1, []byte(fmt.Sprintf("[CHILD DEBUG] %s\n", msg)))
 }
@@ -56,18 +54,6 @@ func Child(p2cRFd, c2pWFd int) int {
 		childLog(fmt.Sprintf("RESOURCE FAILURE: %v", err))
 		return 1
 	}
-	if cfg.MemoryLimitGB > 0 {
-		memoryBytes, err := resourceBytes(cfg.MemoryLimitGB, gbToBytes, "memory_limit_gb")
-		if err != nil {
-			childLog(fmt.Sprintf("RESOURCE FAILURE: %v", err))
-			return 1
-		}
-		rlim := syscall.Rlimit{Cur: memoryBytes, Max: memoryBytes}
-		if err := syscall.Setrlimit(unix.RLIMIT_AS, &rlim); err != nil {
-			childLog(fmt.Sprintf("RESOURCE FAILURE: memory limit: %v", err))
-			return 1
-		}
-	}
 
 	if cfg.NetworkMode == network.Bridge {
 		if err := network.ConfigureChildIface(cfg.BridgeConfig); err != nil {
@@ -97,14 +83,6 @@ func Child(p2cRFd, c2pWFd int) int {
 	if cfg.ReadOnlyRoot {
 		if err := syscall.Mount("", "/", "", syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_BIND, ""); err != nil {
 			childLog(fmt.Sprintf("JAIL FAILURE: read-only root: %v", err))
-			return 1
-		}
-	}
-
-	rlim := syscall.Rlimit{Cur: uint64(cfg.MaxProcesses), Max: uint64(cfg.MaxProcesses)}
-	if cfg.MaxProcesses > 0 {
-		if err := syscall.Setrlimit(unix.RLIMIT_NPROC, &rlim); err != nil {
-			childLog(fmt.Sprintf("RESOURCE FAILURE: process limit: %v", err))
 			return 1
 		}
 	}
@@ -299,11 +277,4 @@ func lastCapability() (uintptr, error) {
 		return 0, fmt.Errorf("parse kernel capability limit: %w", err)
 	}
 	return uintptr(value), nil
-}
-
-func resourceBytes(value int, multiplier uint64, name string) (uint64, error) {
-	if value < 0 || uint64(value) > ^uint64(0)/multiplier {
-		return 0, fmt.Errorf("%s overflows the kernel limit", name)
-	}
-	return uint64(value) * multiplier, nil
 }
