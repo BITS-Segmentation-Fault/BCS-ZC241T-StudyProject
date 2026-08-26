@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"golang.org/x/sys/unix"
 	"sandbox/sandbox/child"
@@ -22,19 +21,18 @@ func main() {
 		fatal(err)
 	}
 
-	parsed, err := ParseArgs(publicArgs)
-	if err != nil {
-		fatal(err)
-	}
-
 	if internal {
 		if err := validateInternalChild(); err != nil {
 			fatal(err)
 		}
-		os.Exit(child.Child(parsed.Config, childReadFD, childWriteFD))
+		os.Exit(child.Child(childReadFD, childWriteFD))
 	}
 
-	os.Exit(parent.Parent(parsed.Config, publicArgs))
+	parsed, err := ParseArgs(publicArgs)
+	if err != nil {
+		fatal(err)
+	}
+	os.Exit(parent.Parent(parsed.Config))
 }
 
 func splitInternalInvocation(argv []string) (bool, []string, error) {
@@ -67,24 +65,4 @@ func fatal(err error) {
 	}
 	fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 	os.Exit(1)
-}
-
-func withEnvironment(environment []string, key, value string) []string {
-	prefix := key + "="
-	updated := make([]string, 0, len(environment)+1)
-	found := false
-	for _, entry := range environment {
-		if strings.HasPrefix(entry, prefix) {
-			if !found {
-				updated = append(updated, prefix+value)
-				found = true
-			}
-			continue
-		}
-		updated = append(updated, entry)
-	}
-	if !found {
-		updated = append(updated, prefix+value)
-	}
-	return updated
 }

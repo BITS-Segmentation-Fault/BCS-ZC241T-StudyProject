@@ -16,11 +16,20 @@ import (
 	"sandbox/sandbox/config"
 	"sandbox/sandbox/network"
 	"sandbox/sandbox/resources"
+	"sandbox/sandbox/security"
 )
 
 const childReadyTimeout = 10 * time.Second
 
-func Parent(cfg config.Config, publicArgs []string) int {
+func Parent(cfg config.Config) int {
+	if err := cfg.Validate(); err != nil {
+		log.Printf("[PRE-FLIGHT ERROR] invalid configuration: %v", err)
+		return 1
+	}
+	if err := security.ValidateSyscallNames(cfg.BlockedSyscalls); err != nil {
+		log.Printf("[PRE-FLIGHT ERROR] invalid syscall policy: %v", err)
+		return 1
+	}
 	if err := resources.CheckCPUSupport(cfg.CPULimitPercent); err != nil {
 		log.Printf("[PRE-FLIGHT ERROR] CPU limit cannot be provisioned: %v", err)
 		return 1
@@ -52,8 +61,7 @@ func Parent(cfg config.Config, publicArgs []string) int {
 		return 1
 	}
 
-	childArgs := append([]string{"--internal-child"}, publicArgs...)
-	cmd := exec.Command("/proc/self/exe", childArgs...)
+	cmd := exec.Command("/proc/self/exe", "--internal-child")
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -109,11 +117,11 @@ func Parent(cfg config.Config, publicArgs []string) int {
 		}
 	}
 
-	if _, err := p2cW.Write([]byte{common.AckByte}); err != nil {
+	if err := common.SendConfig(p2cW, cfg); err != nil {
 		terminateChild(cmd)
 		closeFiles(p2cW, c2pR)
 		cleanupBridge(bridgeState, cfg)
-		log.Printf("[SANDBOX] child acknowledgement failed: %v", err)
+		log.Printf("[SANDBOX] configuration snapshot failed: %v", err)
 		return 1
 	}
 	closeFiles(p2cW, c2pR)
