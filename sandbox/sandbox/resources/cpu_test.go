@@ -45,6 +45,8 @@ func (f *fakeCgroupFileSystem) MkdirTemp(parent, pattern string) (string, error)
 	}
 	f.lastCgroup = filepath.Join(parent, pattern+"test")
 	f.files[filepath.Join(f.lastCgroup, "cpu.max")] = nil
+	f.files[filepath.Join(f.lastCgroup, "memory.max")] = nil
+	f.files[filepath.Join(f.lastCgroup, "pids.max")] = nil
 	f.files[filepath.Join(f.lastCgroup, "cgroup.procs")] = nil
 	return f.lastCgroup, nil
 }
@@ -165,6 +167,47 @@ func TestPrepareCPULimitConfiguresAttachesAndCleansUp(t *testing.T) {
 	}
 	if len(fake.removed) != 1 || fake.removed[0] != limit.path {
 		t.Fatalf("removed cgroups = %v, want one removal of %q", fake.removed, limit.path)
+	}
+}
+
+func TestPrepareResourceLimitsConfiguresAggregateControllers(t *testing.T) {
+	fake := newFakeCgroupFileSystem()
+	procPath, mountPath, delegatedPath := seedDelegatedHierarchy(fake)
+	fake.files[filepath.Join(delegatedPath, "cgroup.controllers")] = []byte("cpu memory pids\n")
+	fake.files[filepath.Join(delegatedPath, "cgroup.subtree_control")] = []byte("cpu memory pids\n")
+
+	limit, err := prepareResourceLimits(25, 2, 17, procPath, mountPath, fake)
+	if err != nil {
+		t.Fatalf("prepareResourceLimits() error = %v", err)
+	}
+	if got, want := string(fake.writes[filepath.Join(limit.path, "cpu.max")]), "25000 100000\n"; got != want {
+		t.Fatalf("cpu.max = %q, want %q", got, want)
+	}
+	if got, want := string(fake.writes[filepath.Join(limit.path, "memory.max")]), "2147483648\n"; got != want {
+		t.Fatalf("memory.max = %q, want %q", got, want)
+	}
+	if got, want := string(fake.writes[filepath.Join(limit.path, "pids.max")]), "17\n"; got != want {
+		t.Fatalf("pids.max = %q, want %q", got, want)
+	}
+	if err := limit.Attach(1234); err != nil {
+		t.Fatalf("Attach() error = %v", err)
+	}
+	if err := limit.Cleanup(); err != nil {
+		t.Fatalf("Cleanup() error = %v", err)
+	}
+}
+
+func TestPrepareResourceLimitsDisabledDoesNotAccessCgroup(t *testing.T) {
+	fake := newFakeCgroupFileSystem()
+	limit, err := prepareResourceLimits(0, 0, 0, "/missing/proc/self/cgroup", "/missing/cgroup", fake)
+	if err != nil {
+		t.Fatalf("prepareResourceLimits() error = %v", err)
+	}
+	if limit != nil {
+		t.Fatal("prepareResourceLimits() returned a handle for disabled limits")
+	}
+	if len(fake.readPaths) != 0 {
+		t.Fatalf("disabled limits read cgroup paths: %v", fake.readPaths)
 	}
 }
 

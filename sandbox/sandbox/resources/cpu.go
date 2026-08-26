@@ -18,6 +18,7 @@ const (
 	procSelfCgroup  = "/proc/self/cgroup"
 	cgroupMount     = "/sys/fs/cgroup"
 	cgroupCPUPeriod = 100000
+	gbToBytes       = 1024 * 1024 * 1024
 )
 
 // cgroupFileSystem contains the filesystem operations needed to provision a
@@ -62,6 +63,83 @@ type CPULimit struct {
 // handle is returned for the disabled limit, without touching cgroup files.
 func PrepareCPULimit(percent int) (*CPULimit, error) {
 	return prepareCPULimit(percent, procSelfCgroup, cgroupMount, osCgroupFileSystem{})
+}
+
+// PrepareResourceLimits creates one delegated cgroup for all aggregate
+// resource limits requested by the configuration. Zero disables an
+// individual limit without touching the cgroup filesystem.
+func PrepareResourceLimits(cpuPercent, memoryGB, maxProcesses int) (*CPULimit, error) {
+	return prepareResourceLimits(cpuPercent, memoryGB, maxProcesses, procSelfCgroup, cgroupMount, osCgroupFileSystem{})
+}
+
+func prepareResourceLimits(cpuPercent, memoryGB, maxProcesses int, procPath, mountPath string, filesystem cgroupFileSystem) (*CPULimit, error) {
+	if cpuPercent < 0 || cpuPercent > 100 {
+		return nil, fmt.Errorf("cpu limit percent must be between 0 and 100")
+	}
+	if memoryGB < 0 {
+		return nil, fmt.Errorf("memory limit must not be negative")
+	}
+	if maxProcesses < 0 {
+		return nil, fmt.Errorf("process limit must not be negative")
+	}
+	if cpuPercent == 0 && memoryGB == 0 && maxProcesses == 0 {
+		return nil, nil
+	}
+
+	procData, err := filesystem.ReadFile(procPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read process cgroup membership: %v", err)
+	}
+	relativePath, err := parseUnifiedCgroupPath(strings.NewReader(string(procData)))
+	if err != nil {
+		return nil, err
+	}
+	delegatedPath, err := resolveDelegatedCgroupPath(mountPath, relativePath)
+	if err != nil {
+		return nil, err
+	}
+
+	controllers, err := filesystem.ReadFile(filepath.Join(delegatedPath, "cgroup.controllers"))
+	if err != nil {
+		return nil, fmt.Errorf("cgroup-v2 controllers are unavailable: %v", err)
+	}
+	subtree, err := filesystem.ReadFile(filepath.Join(delegatedPath, "cgroup.subtree_control"))
+	if err != nil {
+		return nil, fmt.Errorf("cgroup-v2 controllers are not delegated: %v", err)
+	}
+	for _, controller := range requestedControllers(cpuPercent, memoryGB, maxProcesses) {
+		if !containsWord(string(controllers), controller) {
+			return nil, fmt.Errorf("cgroup-v2 %s controller is unavailable in the delegated hierarchy", controller)
+		}
+		if !containsWord(string(subtree), controller) {
+			return nil, fmt.Errorf("cgroup-v2 %s controller is not delegated to the sandbox", controller)
+		}
+	}
+
+	path, err := filesystem.MkdirTemp(delegatedPath, "sandbox-")
+	if err != nil {
+		return nil, fmt.Errorf("cgroup-v2 delegation is unavailable: cannot create child cgroup: %v", err)
+	}
+	limit := &CPULimit{path: path, filesystem: filesystem}
+	if err := limit.configure(cpuPercent, memoryGB, maxProcesses); err != nil {
+		_ = limit.Cleanup()
+		return nil, err
+	}
+	return limit, nil
+}
+
+func requestedControllers(cpuPercent, memoryGB, maxProcesses int) []string {
+	controllers := make([]string, 0, 3)
+	if cpuPercent > 0 {
+		controllers = append(controllers, "cpu")
+	}
+	if memoryGB > 0 {
+		controllers = append(controllers, "memory")
+	}
+	if maxProcesses > 0 {
+		controllers = append(controllers, "pids")
+	}
+	return controllers
 }
 
 func prepareCPULimit(percent int, procPath, mountPath string, filesystem cgroupFileSystem) (*CPULimit, error) {
@@ -174,6 +252,29 @@ func (limit *CPULimit) configureQuota(percent int) error {
 	}
 	if err := limit.filesystem.WriteFile(filepath.Join(limit.path, "cpu.max"), []byte(fmt.Sprintf("%d %d\n", quota, cgroupCPUPeriod)), 0600); err != nil {
 		return fmt.Errorf("cannot configure CPU quota: %v", err)
+	}
+	return nil
+}
+
+func (limit *CPULimit) configure(cpuPercent, memoryGB, maxProcesses int) error {
+	if cpuPercent > 0 {
+		if err := limit.configureQuota(cpuPercent); err != nil {
+			return err
+		}
+	}
+	if memoryGB > 0 {
+		if uint64(memoryGB) > ^uint64(0)/gbToBytes {
+			return fmt.Errorf("memory limit overflows the kernel limit")
+		}
+		memoryBytes := uint64(memoryGB) * gbToBytes
+		if err := limit.filesystem.WriteFile(filepath.Join(limit.path, "memory.max"), []byte(strconv.FormatUint(memoryBytes, 10)+"\n"), 0600); err != nil {
+			return fmt.Errorf("cannot configure memory limit: %v", err)
+		}
+	}
+	if maxProcesses > 0 {
+		if err := limit.filesystem.WriteFile(filepath.Join(limit.path, "pids.max"), []byte(strconv.Itoa(maxProcesses)+"\n"), 0600); err != nil {
+			return fmt.Errorf("cannot configure process limit: %v", err)
+		}
 	}
 	return nil
 }

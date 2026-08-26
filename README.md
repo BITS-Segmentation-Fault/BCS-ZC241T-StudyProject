@@ -89,6 +89,9 @@ back only resources created by that run. CPU limits from 1 through 100 require
 a delegated CPU controller in a writable cgroup-v2 hierarchy; `0` disables
 the CPU limit. If that controller is unavailable, configure
 `cpu_limit_percent: 0` or provide the required delegation.
+Aggregate memory and process limits are also disabled by default. Explicit
+`memory_limit_gb` and `max_processes` values require delegated `memory` and
+`pids` controllers in the same writable cgroup-v2 hierarchy.
 
 The default security policy drops `ALL` capabilities and uses a killing
 policy for blocked syscalls. Only `kill` and `trap` are accepted for that
