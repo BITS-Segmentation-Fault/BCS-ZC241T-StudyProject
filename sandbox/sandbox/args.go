@@ -28,12 +28,6 @@ type parsedCLI struct {
 	args   []string
 }
 
-var cliFlagTakesValue = map[string]bool{
-	"config": true, "network-mode": true, "bridge-subnet": true,
-	"bridge-gateway": true, "bridge-container-ip": true,
-	"env-whitelist": true, "file-size-limit": true,
-}
-
 func registerFlags(fs *flag.FlagSet, defaults config.Config) cliValues {
 	return cliValues{
 		configFile:      fs.String("config", "", "Load configuration from a YAML file"),
@@ -47,53 +41,20 @@ func registerFlags(fs *flag.FlagSet, defaults config.Config) cliValues {
 }
 
 func parseCLI(argv []string, defaults config.Config) (parsedCLI, error) {
-	seen, err := validateFlagTokens(argv)
-	if err != nil {
-		return parsedCLI{}, err
-	}
 	fs := flag.NewFlagSet("sandbox", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	values := registerFlags(fs, defaults)
 	if err := fs.Parse(argv); err != nil {
 		return parsedCLI{}, err
 	}
+	seen := make(map[string]bool)
+	fs.Visit(func(flag *flag.Flag) {
+		seen[flag.Name] = true
+	})
 	return parsedCLI{values: values, seen: seen, args: append([]string(nil), fs.Args()...)}, nil
 }
 
-func validateFlagTokens(argv []string) (map[string]bool, error) {
-	seen := make(map[string]bool)
-	for i := 0; i < len(argv); i++ {
-		arg := argv[i]
-		if arg == "--" || !strings.HasPrefix(arg, "-") || arg == "-" {
-			break
-		}
-		nameValue := strings.TrimLeft(arg, "-")
-		name, value, hasValue := strings.Cut(nameValue, "=")
-		if name == "" {
-			return nil, errors.New("invalid empty option")
-		}
-		if seen[name] {
-			return nil, fmt.Errorf("option --%s was specified more than once", name)
-		}
-		seen[name] = true
-		if !cliFlagTakesValue[name] {
-			continue
-		}
-		if hasValue {
-			if value == "" {
-				return nil, fmt.Errorf("option --%s requires a value", name)
-			}
-			continue
-		}
-		if i+1 >= len(argv) {
-			return nil, fmt.Errorf("option --%s requires a value", name)
-		}
-		i++
-	}
-	return seen, nil
-}
-
-func ParseArgs(argv []string) (config.Config, error) {
+func parseArgs(argv []string) (config.Config, error) {
 	discovered, err := parseCLI(argv, config.DefaultConfig())
 	if err != nil {
 		return config.Config{}, err

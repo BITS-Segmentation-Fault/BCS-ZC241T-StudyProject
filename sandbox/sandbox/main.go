@@ -27,7 +27,7 @@ func main() {
 		os.Exit(child.Child(childReadFD))
 	}
 
-	cfg, err := ParseArgs(publicArgs)
+	cfg, err := parseArgs(publicArgs)
 	if err != nil {
 		fatal(err)
 	}
