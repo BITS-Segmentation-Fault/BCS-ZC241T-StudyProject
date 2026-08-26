@@ -127,6 +127,12 @@ func buildFilter(blockedSyscallAction config.SeccompAction, blockedSyscalls []st
 		{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS},
 		{BPF_LD | BPF_W | BPF_ABS, 0, 0, seccompDataNrOffset},
 	}
+	if x32ABIBit != 0 {
+		instructions = append(instructions,
+			sockFilter{BPF_JMP | BPF_JSET | BPF_K, 0, 1, x32ABIBit},
+			sockFilter{BPF_RET | BPF_K, 0, 0, SECCOMP_RET_KILL_PROCESS},
+		)
+	}
 	for _, number := range numbers {
 		instructions = append(instructions,
 			sockFilter{BPF_JMP | BPF_JEQ | BPF_K, 0, 1, number},

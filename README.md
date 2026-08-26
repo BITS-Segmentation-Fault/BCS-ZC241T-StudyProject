@@ -95,8 +95,9 @@ Aggregate memory and process limits are also disabled by default. Explicit
 
 The default security policy drops `ALL` capabilities and uses a killing
 policy for blocked syscalls. Only `kill` and `trap` are accepted for that
-policy. Configuration names are validated before a child or bridge is
-created. Use one `command` list in YAML or positional CLI arguments; public
+policy. The denylist has an architecture guard but is not a complete syscall
+allowlist or a guarantee against hostile workloads. Configuration names are
+validated before a child or bridge is created. Use one `command` list in YAML or positional CLI arguments; public
 flags must precede the command, and `--` explicitly terminates the flag
 section. Environment names must be valid shell variable names and duplicate
 keys are rejected.
