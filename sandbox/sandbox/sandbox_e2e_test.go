@@ -33,6 +33,18 @@ func TestSandboxRootlessHostAndNone(t *testing.T) {
 				t.Fatalf("sandbox %s execution failed: %v\n%s", mode, err, output)
 			}
 			text := string(output)
+			for _, want := range []struct {
+				prefix string
+				line   string
+			}{
+				{prefix: "uid_map=", line: fmt.Sprintf("uid_map=0 %d 1", os.Getuid())},
+				{prefix: "gid_map=", line: fmt.Sprintf("gid_map=0 %d 1", os.Getgid())},
+				{prefix: "setgroups=", line: "setgroups=deny"},
+			} {
+				if got := findLine(text, want.prefix); got != want.line {
+					t.Fatalf("sandbox %s output line %q, want %q:\n%s", mode, got, want.line, text)
+				}
+			}
 			for _, want := range []string{"uid=0", "gid=0", "pid=1", "cwd=/work", "env=probe-value", "read-error"} {
 				if !strings.Contains(text, want) {
 					t.Fatalf("sandbox %s output missing %q:\n%s", mode, want, text)

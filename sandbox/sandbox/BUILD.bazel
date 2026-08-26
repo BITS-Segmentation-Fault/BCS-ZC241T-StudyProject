@@ -36,12 +36,6 @@ go_library(
 )
 
 go_library(
-    name = "idmap",
-    srcs = ["idmap/idmap.go"],
-    importpath = "sandbox/sandbox/idmap",
-)
-
-go_library(
     name = "diag",
     srcs = ["diag/diag.go"],
     importpath = "sandbox/sandbox/diag",
@@ -169,13 +163,6 @@ go_test(
         ":config",
         "@org_golang_x_sys//unix:go_default_library",
     ],
-)
-
-go_test(
-    name = "idmap_test",
-    srcs = ["idmap/idmap.go", "idmap/idmap_test.go"],
-    importpath = "sandbox/sandbox/idmap",
-    deps = [":fs"],
 )
 
 go_test(
