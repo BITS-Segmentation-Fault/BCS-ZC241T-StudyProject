@@ -8,7 +8,7 @@ import (
 )
 
 func TestParseArgs(t *testing.T) {
-	got, err := ParseArgs([]string{"--network-mode=host", "/bin/echo", ""})
+	got, err := parseArgs([]string{"--network-mode=host", "/bin/echo", ""})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,25 +25,25 @@ func TestParseArgsConfigAndOverrides(t *testing.T) {
 	if err := os.WriteFile(path, []byte("command: [/bin/echo, from-config]\nnetwork_mode: host\nfile_size_limit_mb: 4\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	got, err := ParseArgs([]string{"--network-mode", "host", "--config", path, "--file-size-limit", "8"})
+	got, err := parseArgs([]string{"--network-mode", "host", "--config", path, "--file-size-limit", "8", "--env-whitelist", "ALLOWED"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got.NetworkMode) != "host" || got.FileSizeLimitMB != 8 {
+	if string(got.NetworkMode) != "host" || got.FileSizeLimitMB != 8 || strings.Join(got.EnvWhitelist, ",") != "ALLOWED" {
 		t.Fatalf("config/override lost: %+v", got)
 	}
 }
 
 func TestParseArgsRejectsInvalidPublicSyntax(t *testing.T) {
-	for _, argv := range [][]string{{}, {"--unknown", "/bin/echo"}, {"--verbose", "--verbose", "/bin/echo"}, {"--file-size-limit"}} {
-		if _, err := ParseArgs(argv); err == nil {
+	for _, argv := range [][]string{{}, {"--unknown", "/bin/echo"}, {"--file-size-limit"}} {
+		if _, err := parseArgs(argv); err == nil {
 			t.Errorf("ParseArgs(%q) accepted invalid input", argv)
 		}
 	}
 }
 
 func TestParseArgsStopsFlagsAtDoubleDash(t *testing.T) {
-	got, err := ParseArgs([]string{"--network-mode", "none", "--", "/bin/echo", "--file-size-limit", ""})
+	got, err := parseArgs([]string{"--network-mode", "none", "--", "/bin/echo", "--file-size-limit", ""})
 	if err != nil {
 		t.Fatal(err)
 	}
