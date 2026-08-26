@@ -126,11 +126,7 @@ func Child(p2cRFd, c2pWFd int) int {
 
 	// ... (Rest of your function: CAPABILITIES, JAIL, SECCOMP, EXEC)
 
-	rootfsTarget := cfg.RootFSSource
-	if rootfsTarget == "" {
-		rootfsTarget = "/var/lib/sandbox/rootfs"
-	}
-	if err := fs.IsolateRootFS(rootfsTarget, cfg.BindMounts); err != nil {
+	if err := fs.IsolateRootFS(cfg.RootFSSource, cfg.BindMounts); err != nil {
 		childLog(fmt.Sprintf("JAIL FAILURE: %v", err))
 		return 1
 	}

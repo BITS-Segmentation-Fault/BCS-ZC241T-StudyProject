@@ -106,7 +106,8 @@ go_library(
         ":config",
         ":network",
         ":resources",
-		":security",
+        ":rootfs",
+        ":security",
     ],
 )
 
@@ -201,7 +202,8 @@ go_test(
         ":config",
         ":network",
         ":resources",
-		":security",
+        ":rootfs",
+        ":security",
     ],
 )
 
@@ -272,6 +274,7 @@ go_test(
         "main.go",
         "args.go",
         "sandbox_e2e_test.go",
+        "sandbox_managed_rootfs_e2e_test.go",
         "sandbox_test_helpers_test.go",
     ],
     data = [":sandbox", ":testprobe"],
