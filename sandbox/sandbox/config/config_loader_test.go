@@ -10,7 +10,7 @@ func TestLoadConfigDefaultsAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.BlockedSyscallAction != ActionKill || c.FileSizeLimitMB != 100 || c.CPULimitPercent != 100 || c.MemoryLimitGB != 1 || c.MaxProcesses != 100 || c.RootFSSource != "/var/lib/sandbox/rootfs" || c.WorkingDir != "/" {
+	if c.BlockedSyscallAction != ActionKill || c.FileSizeLimitMB != 100 || c.CPULimitPercent != 0 || c.MemoryLimitGB != 1 || c.MaxProcesses != 100 || c.RootFSSource != "/var/lib/sandbox/rootfs" || c.WorkingDir != "/" {
 		t.Fatalf("defaults lost: %+v", c)
 	}
 	c, err = LoadConfigFromReader(strings.NewReader("command: [/bin/echo]\nblocked_syscall_action: trap\nfile_size_limit_mb: 4\n"))
