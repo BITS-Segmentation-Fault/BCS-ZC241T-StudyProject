@@ -59,24 +59,29 @@ func TestSandboxPreservesExitAndSignalStatus(t *testing.T) {
 		t.Fatalf("sandbox did not preserve exit code: err=%v output=%s", err, output)
 	}
 
-	signalConfig := writeSandboxConfig(t, rootfs, "host", "--sleep=30")
-	running := exec.Command(sandbox, "--config", signalConfig)
-	var signalOutput bytes.Buffer
-	running.Stdout = &signalOutput
-	running.Stderr = &signalOutput
-	if err := running.Start(); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(250 * time.Millisecond)
-	if err := running.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatal(err)
-	}
-	err = running.Wait()
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 143 {
-		if unsupportedSandboxOutput(signalOutput.String()) {
-			skipOrFail(t, signalOutput.String())
-		}
-		t.Fatalf("sandbox did not preserve signal status: err=%v output=%s", err, signalOutput.String())
+	for _, signal := range []syscall.Signal{syscall.SIGINT, syscall.SIGHUP, syscall.SIGTERM, syscall.SIGQUIT} {
+		t.Run(signal.String(), func(t *testing.T) {
+			signalConfig := writeSandboxConfig(t, rootfs, "host", "--sleep=30")
+			running := exec.Command(sandbox, "--config", signalConfig)
+			var signalOutput bytes.Buffer
+			running.Stdout = &signalOutput
+			running.Stderr = &signalOutput
+			if err := running.Start(); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(250 * time.Millisecond)
+			if err := running.Process.Signal(signal); err != nil {
+				t.Fatal(err)
+			}
+			err := running.Wait()
+			expected := 128 + int(signal)
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != expected {
+				if unsupportedSandboxOutput(signalOutput.String()) {
+					skipOrFail(t, signalOutput.String())
+				}
+				t.Fatalf("sandbox did not preserve %s status: err=%v output=%s", signal, err, signalOutput.String())
+			}
+		})
 	}
 }
 
@@ -114,7 +119,6 @@ blocked_syscall_action: kill
 blocked_syscalls: []
 drop_capabilities: []
 file_size_limit_mb: 0
-cpu_limit_percent: 0
 memory_limit_gb: 0
 max_processes: 0
 network_mode: %s

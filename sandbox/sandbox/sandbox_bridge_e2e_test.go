@@ -30,7 +30,7 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 		}
 		t.Fatalf("privileged bridge sandbox failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "pid=1") {
+	if !strings.Contains(string(output), "pid=2") || !strings.Contains(string(output), "ppid=1") {
 		t.Fatalf("bridge probe did not execute in the sandbox: %s", output)
 	}
 }
