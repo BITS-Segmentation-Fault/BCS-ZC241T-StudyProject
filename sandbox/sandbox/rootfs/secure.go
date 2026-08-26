@@ -82,7 +82,7 @@ func ensureManagedVersionDir(cacheDir string) (string, int, error) {
 	}
 	current := cacheFD
 	currentPath := filepath.Clean(cacheDir)
-	for _, component := range []string{"bcs-zc241t-sandbox", "rootfs", Provider, Version} {
+	for _, component := range []string{"bcs-zc241t-sandbox", "rootfs", provider, version} {
 		next, openErr := openDirectoryAt(current, component)
 		if openErr == unix.ENOENT {
 			if mkdirErr := unix.Mkdirat(current, component, 0700); mkdirErr != nil && mkdirErr != unix.EEXIST {
