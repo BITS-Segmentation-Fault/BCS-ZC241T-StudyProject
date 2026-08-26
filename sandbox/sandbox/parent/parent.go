@@ -167,7 +167,7 @@ func waitForChild(cmd *exec.Cmd, state *network.BridgeState, cfg config.Config) 
 	defer cleanupBridge(state, cfg)
 
 	signals := make(chan os.Signal, 4)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(signals)
 	done := make(chan struct{})
 	defer close(done)
