@@ -9,11 +9,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"net"
+	"fmt"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -76,14 +77,20 @@ func minimalArchive(t *testing.T) []byte {
 	)
 }
 
-func archiveRelease(t *testing.T, serverURL string, body []byte) ReleaseInfo {
+const testReleaseURL = "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/rootfs.tar.gz"
+
+func archiveRelease(t *testing.T, body []byte) ReleaseInfo {
 	t.Helper()
+	production, ok := releaseCatalog[runtime.GOARCH]
+	if !ok {
+		t.Fatalf("unsupported test architecture %q", runtime.GOARCH)
+	}
 	digest := sha256.Sum256(body)
 	return ReleaseInfo{
-		GoArch:          "amd64",
-		AlpineArch:      "x86_64",
+		GoArch:          runtime.GOARCH,
+		AlpineArch:      production.AlpineArch,
 		ArchiveName:     "synthetic-rootfs.tar.gz",
-		URL:             serverURL + "/rootfs.tar.gz",
+		URL:             testReleaseURL,
 		SHA256:          hex.EncodeToString(digest[:]),
 		TreeSHA256:      archiveTreeDigest(t, body),
 		MaxArchiveBytes: int64(len(body)),
@@ -110,53 +117,38 @@ func archiveTreeDigest(t *testing.T, body []byte) string {
 	return digest
 }
 
-func testServer(t *testing.T, body []byte, status int, requests *atomic.Int32) *httptest.Server {
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
+
+func testResponse(status int, body []byte) *http.Response {
+	return &http.Response{
+		StatusCode:    status,
+		Status:        fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		Header:        make(http.Header),
+		Body:          io.NopCloser(bytes.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+}
+
+func testProvisioner(t *testing.T, body []byte, status int, requests *atomic.Int32) *Provisioner {
 	t.Helper()
-	return testTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	release := archiveRelease(t, body)
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if requests != nil {
 			requests.Add(1)
 		}
-		w.WriteHeader(status)
 		if status == http.StatusOK {
-			_, _ = w.Write(body)
+			return testResponse(status, body), nil
 		}
-	}))
-}
-
-func testTLSServer(t *testing.T, handler http.Handler) *httptest.Server {
-	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("local test listener unavailable: %v", err)
-	}
-	server := httptest.NewUnstartedServer(handler)
-	server.Listener = listener
-	server.StartTLS()
-	return server
-}
-
-func testHTTPServer(t *testing.T, handler http.Handler) *httptest.Server {
-	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Skipf("local test listener unavailable: %v", err)
-	}
-	server := httptest.NewUnstartedServer(handler)
-	server.Listener = listener
-	server.Start()
-	return server
-}
-
-func testProvisioner(t *testing.T, server *httptest.Server, body []byte) *Provisioner {
-	t.Helper()
-	release := archiveRelease(t, server.URL, body)
-	client := server.Client()
-	client.Timeout = 2 * time.Second
+		return testResponse(status, nil), nil
+	})
 	return &Provisioner{
-		CacheDir:      t.TempDir(),
-		Client:        client,
-		releases:      map[string]ReleaseInfo{"amd64": release},
-		allowTestURLs: true,
+		CacheDir: t.TempDir(),
+		Client:   &http.Client{Transport: transport, Timeout: 2 * time.Second},
+		releases: map[string]ReleaseInfo{runtime.GOARCH: release},
 	}
 }
 
@@ -211,8 +203,7 @@ func TestExplicitMissingRootfsDoesNotTouchCacheOrNetwork(t *testing.T) {
 func TestProvisionAndReuseOffline(t *testing.T) {
 	body := minimalArchive(t)
 	var requests atomic.Int32
-	server := testServer(t, body, http.StatusOK, &requests)
-	p := testProvisioner(t, server, body)
+	p := testProvisioner(t, body, http.StatusOK, &requests)
 	target, err := p.Resolve("")
 	if err != nil {
 		t.Fatalf("first Resolve() error = %v", err)
@@ -220,10 +211,9 @@ func TestProvisionAndReuseOffline(t *testing.T) {
 	if requests.Load() != 1 {
 		t.Fatalf("request count = %d, want 1", requests.Load())
 	}
-	if err := validatePublishedRootfs(target, p.releases["amd64"]); err != nil {
+	if err := validatePublishedRootfs(target, p.releases[runtime.GOARCH]); err != nil {
 		t.Fatalf("published rootfs is invalid: %v", err)
 	}
-	server.Close()
 	if got, err := p.Resolve(""); err != nil || got != target {
 		t.Fatalf("offline Resolve() = %q, %v; want %q, nil", got, err, target)
 	}
@@ -235,9 +225,7 @@ func TestProvisionAndReuseOffline(t *testing.T) {
 func TestInvalidManifestIsReplaced(t *testing.T) {
 	body := minimalArchive(t)
 	var requests atomic.Int32
-	server := testServer(t, body, http.StatusOK, &requests)
-	defer server.Close()
-	p := testProvisioner(t, server, body)
+	p := testProvisioner(t, body, http.StatusOK, &requests)
 	target, err := p.Resolve("")
 	if err != nil {
 		t.Fatal(err)
@@ -256,16 +244,14 @@ func TestInvalidManifestIsReplaced(t *testing.T) {
 func TestProvisioningFailuresLeaveNoPublishedRootfs(t *testing.T) {
 	body := minimalArchive(t)
 	var requests atomic.Int32
-	server := testServer(t, body, http.StatusOK, &requests)
-	defer server.Close()
-	p := testProvisioner(t, server, body)
-	release := p.releases["amd64"]
+	p := testProvisioner(t, body, http.StatusOK, &requests)
+	release := p.releases[runtime.GOARCH]
 	release.SHA256 = strings.Repeat("0", 64)
-	p.releases["amd64"] = release
+	p.releases[runtime.GOARCH] = release
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "configure rootfs_source") {
 		t.Fatalf("digest failure = %v, want actionable cache/custom-rootfs error", err)
 	}
-	target, _ := CachePath(p.CacheDir, "amd64")
+	target, _ := CachePath(p.CacheDir, runtime.GOARCH)
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("failed provisioning left published rootfs: %v", err)
 	}
@@ -288,17 +274,15 @@ func TestProvisioningFailureAndResponseLimits(t *testing.T) {
 		{name: "digest mismatch", status: http.StatusOK, badDigest: true, want: "SHA-256 mismatch"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			server := testServer(t, body, tt.status, nil)
-			defer server.Close()
-			p := testProvisioner(t, server, body)
-			release := p.releases["amd64"]
+			p := testProvisioner(t, body, tt.status, nil)
+			release := p.releases[runtime.GOARCH]
 			if tt.maxBytes != 0 {
 				release.MaxArchiveBytes = tt.maxBytes
 			}
 			if tt.badDigest {
 				release.SHA256 = strings.Repeat("f", 64)
 			}
-			p.releases["amd64"] = release
+			p.releases[runtime.GOARCH] = release
 			if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("Resolve() error = %v, want %q", err, tt.want)
 			}
@@ -309,9 +293,7 @@ func TestProvisioningFailureAndResponseLimits(t *testing.T) {
 func TestConcurrentProvisioningDownloadsOnce(t *testing.T) {
 	body := minimalArchive(t)
 	var requests atomic.Int32
-	server := testServer(t, body, http.StatusOK, &requests)
-	defer server.Close()
-	p := testProvisioner(t, server, body)
+	p := testProvisioner(t, body, http.StatusOK, &requests)
 	var wait sync.WaitGroup
 	errors := make(chan error, 2)
 	for range 2 {
@@ -336,14 +318,12 @@ func TestConcurrentProvisioningDownloadsOnce(t *testing.T) {
 
 func TestAtomicRenameFailureCleansTemporaryRootfs(t *testing.T) {
 	body := minimalArchive(t)
-	server := testServer(t, body, http.StatusOK, nil)
-	defer server.Close()
-	p := testProvisioner(t, server, body)
+	p := testProvisioner(t, body, http.StatusOK, nil)
 	p.renamePath = func(string, string) error { return errors.New("rename denied") }
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "atomically publish") {
 		t.Fatalf("rename failure = %v", err)
 	}
-	target, _ := CachePath(p.CacheDir, "amd64")
+	target, _ := CachePath(p.CacheDir, runtime.GOARCH)
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("rename failure left target: %v", err)
 	}
@@ -354,16 +334,12 @@ func TestAtomicRenameFailureCleansTemporaryRootfs(t *testing.T) {
 
 func TestHTTPSRedirectIsRequired(t *testing.T) {
 	body := minimalArchive(t)
-	plain := testHTTPServer(t, http.NotFoundHandler())
-	defer plain.Close()
-	secure := testTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, plain.URL, http.StatusFound)
-	}))
-	defer secure.Close()
-	p := testProvisioner(t, secure, body)
-	client := secure.Client()
-	client.CheckRedirect = defaultHTTPClient().CheckRedirect
-	p.Client = client
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	p.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		response := testResponse(http.StatusFound, nil)
+		response.Header.Set("Location", "http://dl-cdn.alpinelinux.org/rootfs.tar.gz")
+		return response, nil
+	})}
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "non-HTTPS") {
 		t.Fatalf("HTTP redirect error = %v, want HTTPS rejection", err)
 	}
@@ -371,25 +347,30 @@ func TestHTTPSRedirectIsRequired(t *testing.T) {
 
 func TestHTTPSRedirectAllowsSameHostAndRejectsHostChanges(t *testing.T) {
 	body := minimalArchive(t)
-	var sameHost *httptest.Server
-	sameHost = testTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/rootfs.tar.gz" {
-			http.Redirect(w, r, sameHost.URL+"/final.tar.gz", http.StatusFound)
-			return
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	var requests atomic.Int32
+	p.Client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		if request.URL.String() == testReleaseURL {
+			response := testResponse(http.StatusFound, nil)
+			response.Header.Set("Location", testReleaseURL+".final")
+			return response, nil
 		}
-		_, _ = w.Write(body)
-	}))
-	defer sameHost.Close()
-	p := testProvisioner(t, sameHost, body)
+		return testResponse(http.StatusOK, body), nil
+	})
 	if _, err := p.Resolve(""); err != nil {
 		t.Fatalf("same-host HTTPS redirect failed: %v", err)
 	}
+	if requests.Load() != 2 {
+		t.Fatalf("same-host redirect requests = %d, want 2", requests.Load())
+	}
 
-	differentHost := testTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "https://other.example.invalid/rootfs.tar.gz", http.StatusFound)
-	}))
-	defer differentHost.Close()
-	p = testProvisioner(t, differentHost, body)
+	p = testProvisioner(t, body, http.StatusOK, nil)
+	p.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		response := testResponse(http.StatusFound, nil)
+		response.Header.Set("Location", "https://other.example.invalid/rootfs.tar.gz")
+		return response, nil
+	})}
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "different host") {
 		t.Fatalf("different-host HTTPS redirect error = %v", err)
 	}
@@ -397,12 +378,11 @@ func TestHTTPSRedirectAllowsSameHostAndRejectsHostChanges(t *testing.T) {
 
 func TestDownloadTimeout(t *testing.T) {
 	body := minimalArchive(t)
-	server := testTLSServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		time.Sleep(100 * time.Millisecond)
-		_, _ = w.Write(body)
-	}))
-	defer server.Close()
-	p := testProvisioner(t, server, body)
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	p.Client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
 	p.Client.Timeout = 10 * time.Millisecond
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "request failed") {
 		t.Fatalf("timeout error = %v, want request failure", err)
@@ -535,9 +515,7 @@ func TestCorruptArchiveIsRejected(t *testing.T) {
 
 func TestManifestValidationRejectsUnexpectedFields(t *testing.T) {
 	body := minimalArchive(t)
-	server := testServer(t, body, http.StatusOK, nil)
-	defer server.Close()
-	p := testProvisioner(t, server, body)
+	p := testProvisioner(t, body, http.StatusOK, nil)
 	target, err := p.Resolve("")
 	if err != nil {
 		t.Fatal(err)
@@ -552,7 +530,7 @@ func TestManifestValidationRejectsUnexpectedFields(t *testing.T) {
 	if err := os.WriteFile(manifestPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePublishedRootfs(target, p.releases["amd64"]); err == nil {
+	if err := validatePublishedRootfs(target, p.releases[runtime.GOARCH]); err == nil {
 		t.Fatal("validatePublishedRootfs() accepted unexpected manifest field")
 	}
 }
@@ -595,19 +573,18 @@ func TestModifiedCachedTreeIsRejectedAndPreservedOffline(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := minimalArchive(t)
-			server := testServer(t, body, http.StatusOK, nil)
-			p := testProvisioner(t, server, body)
+			p := testProvisioner(t, body, http.StatusOK, nil)
 			target, err := p.Resolve("")
 			if err != nil {
-				server.Close()
 				t.Fatal(err)
 			}
 			tt.modify(t, target)
-			if err := validatePublishedRootfs(target, p.releases["amd64"]); err == nil {
-				server.Close()
+			if err := validatePublishedRootfs(target, p.releases[runtime.GOARCH]); err == nil {
 				t.Fatal("validatePublishedRootfs() accepted a modified tree")
 			}
-			server.Close()
+			p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, errors.New("offline")
+			})
 			if _, err := p.Resolve(""); err == nil {
 				t.Fatal("offline Resolve() accepted a modified tree")
 			}
@@ -620,9 +597,7 @@ func TestModifiedCachedTreeIsRejectedAndPreservedOffline(t *testing.T) {
 
 func TestReplacementFailureRestoresPreviousRootfs(t *testing.T) {
 	body := minimalArchive(t)
-	server := testServer(t, body, http.StatusOK, nil)
-	defer server.Close()
-	p := testProvisioner(t, server, body)
+	p := testProvisioner(t, body, http.StatusOK, nil)
 	target, err := p.Resolve("")
 	if err != nil {
 		t.Fatal(err)
@@ -676,18 +651,17 @@ func TestCacheSymlinksAndUnsafeModesFailClosed(t *testing.T) {
 
 	t.Run("target mode", func(t *testing.T) {
 		body := minimalArchive(t)
-		server := testServer(t, body, http.StatusOK, nil)
-		p := testProvisioner(t, server, body)
+		p := testProvisioner(t, body, http.StatusOK, nil)
 		target, err := p.Resolve("")
 		if err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
 		if err := os.Chmod(target, 0775); err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
-		server.Close()
+		p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("offline")
+		})
 		if _, err := p.Resolve(""); err == nil {
 			t.Fatal("Resolve() accepted group/other-writable target")
 		}
@@ -698,28 +672,25 @@ func TestCacheSymlinksAndUnsafeModesFailClosed(t *testing.T) {
 
 	t.Run("target symlink", func(t *testing.T) {
 		body := minimalArchive(t)
-		server := testServer(t, body, http.StatusOK, nil)
-		p := testProvisioner(t, server, body)
+		p := testProvisioner(t, body, http.StatusOK, nil)
 		target, err := p.Resolve("")
 		if err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
 		external := t.TempDir()
 		marker := filepath.Join(external, "marker")
 		if err := os.WriteFile(marker, []byte("unchanged"), 0600); err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
 		if err := os.RemoveAll(target); err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
 		if err := os.Symlink(external, target); err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
-		server.Close()
+		p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("offline")
+		})
 		if _, err := p.Resolve(""); err == nil {
 			t.Fatal("Resolve() followed a target symlink")
 		}
@@ -733,28 +704,25 @@ func TestCacheSymlinksAndUnsafeModesFailClosed(t *testing.T) {
 
 	t.Run("manifest symlink", func(t *testing.T) {
 		body := minimalArchive(t)
-		server := testServer(t, body, http.StatusOK, nil)
-		p := testProvisioner(t, server, body)
+		p := testProvisioner(t, body, http.StatusOK, nil)
 		target, err := p.Resolve("")
 		if err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
 		external := filepath.Join(t.TempDir(), "manifest")
 		if err := os.WriteFile(external, []byte("external"), 0600); err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
 		manifestPath := filepath.Join(target, manifestName)
 		if err := os.Remove(manifestPath); err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
 		if err := os.Symlink(external, manifestPath); err != nil {
-			server.Close()
 			t.Fatal(err)
 		}
-		server.Close()
+		p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, errors.New("offline")
+		})
 		if _, err := p.Resolve(""); err == nil {
 			t.Fatal("Resolve() followed a manifest symlink")
 		}
@@ -796,9 +764,7 @@ func TestReleaseURLValidation(t *testing.T) {
 }
 
 func TestHTTPErrorIncludesStatus(t *testing.T) {
-	server := testServer(t, nil, http.StatusServiceUnavailable, nil)
-	defer server.Close()
-	p := testProvisioner(t, server, minimalArchive(t))
+	p := testProvisioner(t, minimalArchive(t), http.StatusServiceUnavailable, nil)
 	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("HTTP error = %v, want status", err)
 	}
