@@ -1,67 +1,54 @@
 package network
 
 import (
+	"encoding/binary"
 	"fmt"
-	"net"
+	"net/netip"
 	"strings"
 	"sync"
 )
 
 type BridgeConfig struct {
-	BridgeName     string `yaml:"bridge_name"`
-	Subnet         string `yaml:"subnet"`
-	GatewayIP      string `yaml:"gateway_ip"`
-	ContainerIP    string `yaml:"container_ip"`
-	HostVethName   string `yaml:"host_veth_name"`
-	NSVethName     string `yaml:"ns_veth_name"`
-	ContainerIface string `yaml:"container_iface"`
-	MTU            int    `yaml:"mtu"`
+	Subnet      string `yaml:"subnet"`
+	GatewayIP   string `yaml:"gateway_ip"`
+	ContainerIP string `yaml:"container_ip"`
+	MTU         int    `yaml:"mtu"`
 }
 
 func (c BridgeConfig) Validate() error {
-	if err := validateInterfaceName("bridge_name", c.BridgeName); err != nil {
-		return err
+	prefix, err := netip.ParsePrefix(c.Subnet)
+	if err != nil || !prefix.Addr().Is4() || prefix != prefix.Masked() {
+		return fmt.Errorf("invalid canonical IPv4 subnet %q", c.Subnet)
 	}
-	if err := validateInterfaceName("host_veth_name", c.HostVethName); err != nil {
-		return err
-	}
-	if err := validateInterfaceName("ns_veth_name", c.NSVethName); err != nil {
-		return err
-	}
-	if err := validateInterfaceName("container_iface", c.ContainerIface); err != nil {
-		return err
-	}
-	if c.BridgeName == c.HostVethName || c.BridgeName == c.NSVethName || c.HostVethName == c.NSVethName {
-		return fmt.Errorf("bridge and veth names must be distinct")
-	}
-	ip, subnet, err := net.ParseCIDR(c.Subnet)
-	if err != nil || ip.To4() == nil || subnet.IP.To4() == nil {
-		return fmt.Errorf("invalid subnet %q", c.Subnet)
-	}
-	ones, bits := subnet.Mask.Size()
-	if bits != 32 || ones < 1 || ones > 30 {
+	bits := prefix.Bits()
+	if bits < 1 || bits > 30 {
 		return fmt.Errorf("subnet %q must leave usable host addresses", c.Subnet)
 	}
-	gateway := net.ParseIP(c.GatewayIP).To4()
-	container := net.ParseIP(c.ContainerIP).To4()
-	if gateway == nil {
+	gateway, err := netip.ParseAddr(c.GatewayIP)
+	if err != nil || !gateway.Is4() {
 		return fmt.Errorf("invalid gateway IP %q", c.GatewayIP)
 	}
-	if container == nil {
+	container, err := netip.ParseAddr(c.ContainerIP)
+	if err != nil || !container.Is4() {
 		return fmt.Errorf("invalid container IP %q", c.ContainerIP)
 	}
-	if !subnet.Contains(gateway) || !subnet.Contains(container) {
+	if !prefix.Contains(gateway) || !prefix.Contains(container) {
 		return fmt.Errorf("gateway and container IPs must belong to subnet %q", c.Subnet)
 	}
-	if gateway.Equal(container) {
+	if gateway == container {
 		return fmt.Errorf("gateway and container IPs must be distinct")
 	}
-	networkIP := subnet.IP.To4()
-	broadcast := make(net.IP, net.IPv4len)
-	for i := range broadcast {
-		broadcast[i] = subnet.IP.To4()[i] | ^subnet.Mask[i]
-	}
-	if gateway.Equal(networkIP) || gateway.Equal(broadcast) || container.Equal(networkIP) || container.Equal(broadcast) {
+	first := prefix.Masked().Addr()
+	firstValue := first.As4()
+	networkValue := binary.BigEndian.Uint32(firstValue[:])
+	mask := prefix.Bits()
+	networkValue &= ^uint32(0) << uint(32-mask)
+	last := netip.AddrFrom4(func() [4]byte {
+		var value [4]byte
+		binary.BigEndian.PutUint32(value[:], networkValue|^uint32(0)>>uint(mask))
+		return value
+	}())
+	if gateway == first || gateway == last || container == first || container == last {
 		return fmt.Errorf("gateway and container IPs cannot be the subnet network or broadcast address")
 	}
 	if c.MTU < 576 || c.MTU > 65535 {
@@ -70,71 +57,64 @@ func (c BridgeConfig) Validate() error {
 	return nil
 }
 
-func validateInterfaceName(field, value string) error {
-	if value == "" {
-		return fmt.Errorf("%s cannot be empty", field)
-	}
-	if len(value) >= 16 {
-		return fmt.Errorf("%s %q exceeds the Linux interface-name limit", field, value)
-	}
-	if strings.IndexByte(value, 0) >= 0 || strings.IndexFunc(value, func(r rune) bool { return r == '/' || r == ' ' || r == '\t' || r == '\n' }) >= 0 {
-		return fmt.Errorf("%s %q contains an invalid character", field, value)
-	}
-	return nil
-}
-
-type NetlinkOps interface {
+type netlinkOps interface {
 	BridgeAdd(name string) error
 	BridgeDel(name string) error
 	VethCreate(name, peer string) error
 	VethDelete(name string) error
 	LinkSetMaster(link, master string) error
-	LinkSetNoMaster(link string) error
 	LinkSetUp(name string) error
-	LinkSetDown(name string) error
 	LinkSetMTU(name string, mtu int) error
-	LinkSetMAC(name string, addr net.HardwareAddr) error
+	LinkSetMAC(name string, addr []byte) error
 	LinkSetName(oldName, newName string) error
 	AddrAdd(iface, ip string) error
-	AddrDel(iface, ip string) error
+	LinkNames() ([]string, error)
 }
 
-type FirewallOps interface {
+type firewallOps interface {
 	AddNAT(subnet, bridge, label string) error
 	DeleteNAT(subnet, bridge, label string) error
 	AddMetadataBlock(destination, label string) error
 	DeleteMetadataBlock(destination, label string) error
 }
 
-type Operations struct {
-	Netlink  NetlinkOps
-	RunIP    func(args ...string) error
-	Firewall FirewallOps
+type operations struct {
+	netlink  netlinkOps
+	runIP    func(args ...string) error
+	firewall firewallOps
 }
 
-type BridgeManager struct {
-	ops   Operations
+type bridgeManager struct {
+	ops   operations
 	runID string
 }
 
 type BridgeState struct {
-	Config  BridgeConfig
-	manager *BridgeManager
-	NAT     *NATState
-
-	mu        sync.Mutex
-	bridge    bool
-	veth      bool
-	attached  bool
-	addressed bool
-	cleaned   bool
+	config      BridgeConfig
+	manager     *bridgeManager
+	nat         *natState
+	bridge      string
+	hostVeth    string
+	nsVeth      string
+	mu          sync.Mutex
+	ownedBridge bool
+	ownedVeth   bool
+	cleaned     bool
 }
 
-type NATState struct {
-	Config   BridgeConfig
-	manager  *BridgeManager
+type natState struct {
+	config   BridgeConfig
+	manager  *bridgeManager
+	bridge   string
 	label    string
 	metadata []string
 	mu       sync.Mutex
 	cleaned  bool
+}
+
+func validateInterfaceName(value string) error {
+	if value == "" || len(value) >= 16 || strings.IndexByte(value, 0) >= 0 || strings.ContainsAny(value, "/ \t\n") {
+		return fmt.Errorf("invalid interface name %q", value)
+	}
+	return nil
 }
