@@ -29,8 +29,9 @@ const (
 	manifestName = "manifest.json"
 	lockName     = ".lock"
 
-	requestTimeout = 45 * time.Second
-	connectTimeout = 10 * time.Second
+	requestTimeout   = 45 * time.Second
+	connectTimeout   = 10 * time.Second
+	maxManifestBytes = 4 << 10
 )
 
 // releaseInfo contains the reviewed metadata for one pinned Alpine archive.
@@ -285,17 +286,13 @@ func (p Provisioner) download(ctx context.Context, release releaseInfo, destinat
 	return nil
 }
 
-func defaultHTTPClient() *http.Client {
-	return defaultHTTPClientFor(nil)
-}
-
 func defaultHTTPClientFor(origin *url.URL) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.DialContext = (&net.Dialer{Timeout: connectTimeout}).DialContext
 	return &http.Client{
 		Transport:     transport,
 		Timeout:       requestTimeout,
-		CheckRedirect: redirectPolicy(nil),
+		CheckRedirect: redirectPolicy(origin),
 	}
 }
 
@@ -324,7 +321,7 @@ func redirectPolicy(origin *url.URL) func(*http.Request, []*http.Request) error 
 		if request.URL.Scheme != "https" || request.URL.User != nil {
 			return fmt.Errorf("refusing redirect to a non-HTTPS or userinfo URL %s", request.URL)
 		}
-		if origin != nil && !strings.EqualFold(request.URL.Host, origin.Host) {
+		if origin != nil && (!strings.EqualFold(request.URL.Hostname(), origin.Hostname()) || request.URL.Port() != origin.Port()) {
 			return fmt.Errorf("refusing redirect to a different host %q", request.URL.Host)
 		}
 		return nil
@@ -432,13 +429,16 @@ func validatePublishedRootfsFD(rootFD int, release releaseInfo) error {
 		file.Close()
 		return fmt.Errorf("rootfs manifest has unsafe type, ownership, or mode")
 	}
-	data, err := io.ReadAll(file)
+	data, err := io.ReadAll(io.LimitReader(file, maxManifestBytes+1))
 	closeErr := file.Close()
 	if err != nil {
 		return err
 	}
 	if closeErr != nil {
 		return closeErr
+	}
+	if len(data) > maxManifestBytes {
+		return fmt.Errorf("rootfs manifest exceeds the %d-byte limit", maxManifestBytes)
 	}
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()

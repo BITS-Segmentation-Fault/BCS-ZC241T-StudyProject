@@ -35,16 +35,24 @@ func treeDigest(root string) (string, error) {
 }
 
 func treeDigestFD(rootFD int) (string, error) {
+	return treeDigestFDWithLimits(rootFD, defaultExtractionLimits)
+}
+
+func treeDigestFDWithLimits(rootFD int, limits extractionLimits) (string, error) {
 	digest := sha256.New()
 	_, _ = digest.Write([]byte(treeDigestVersion))
-	if err := walkTree(rootFD, "", digest, new(int64)); err != nil {
+	if err := walkTree(rootFD, "", digest, new(int64), new(int), limits); err != nil {
 		return "", err
 	}
 	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
-func walkTree(directoryFD int, relative string, digest hash.Hash, extractedBytes *int64) error {
-	names, err := readDirectoryNames(directoryFD)
+func walkTree(directoryFD int, relative string, digest hash.Hash, extractedBytes *int64, entryCount *int, limits extractionLimits) error {
+	remaining := limits.MaxEntries - *entryCount
+	if relative == "" {
+		remaining++ // The project-written manifest is excluded from the digest.
+	}
+	names, err := readDirectoryNames(directoryFD, remaining)
 	if err != nil {
 		return fmt.Errorf("cannot read rootfs directory %q: %v", relative, err)
 	}
@@ -56,6 +64,10 @@ func walkTree(directoryFD int, relative string, digest hash.Hash, extractedBytes
 		if relative == "" && name == manifestName {
 			continue
 		}
+		*entryCount++
+		if *entryCount > limits.MaxEntries {
+			return fmt.Errorf("rootfs tree exceeds the %d-entry limit", limits.MaxEntries)
+		}
 		entry, err := openEntryAt(directoryFD, name)
 		if err != nil {
 			return fmt.Errorf("cannot securely inspect rootfs entry %q: %v", child, err)
@@ -66,9 +78,9 @@ func walkTree(directoryFD int, relative string, digest hash.Hash, extractedBytes
 		}
 		switch entry.stat.Mode & unix.S_IFMT {
 		case unix.S_IFDIR:
-			err = walkTree(entry.fd, child, digest, extractedBytes)
+			err = walkTree(entry.fd, child, digest, extractedBytes, entryCount, limits)
 		case unix.S_IFREG:
-			err = hashRegularFile(entry.fd, child, entry.stat.Size, extractedBytes, digest)
+			err = hashRegularFile(entry.fd, child, entry.stat.Size, extractedBytes, digest, limits)
 		case unix.S_IFLNK:
 			if err = validateInternalTarget(child, entry.target); err != nil {
 				err = fmt.Errorf("rootfs symlink %q is invalid: %v", child, err)
@@ -124,12 +136,12 @@ func writeDigestBytes(digest hash.Hash, value []byte) {
 	_, _ = digest.Write(value)
 }
 
-func hashRegularFile(fd int, name string, size int64, extractedBytes *int64, digest hash.Hash) error {
-	if size < 0 || size > defaultExtractionLimits.MaxFileBytes {
-		return fmt.Errorf("rootfs file %q exceeds the %d-byte file limit", name, defaultExtractionLimits.MaxFileBytes)
+func hashRegularFile(fd int, name string, size int64, extractedBytes *int64, digest hash.Hash, limits extractionLimits) error {
+	if size < 0 || size > limits.MaxFileBytes {
+		return fmt.Errorf("rootfs file %q exceeds the %d-byte file limit", name, limits.MaxFileBytes)
 	}
-	if *extractedBytes > defaultExtractionLimits.MaxExtractedBytes-size {
-		return fmt.Errorf("rootfs tree exceeds the %d-byte extracted-data limit", defaultExtractionLimits.MaxExtractedBytes)
+	if *extractedBytes > limits.MaxExtractedBytes-size {
+		return fmt.Errorf("rootfs tree exceeds the %d-byte extracted-data limit", limits.MaxExtractedBytes)
 	}
 	duplicate, err := unix.Dup(fd)
 	if err != nil {
@@ -175,7 +187,7 @@ func openEntryAt(parentFD int, name string) (rootfsEntry, error) {
 	}
 	typeBits := stat.Mode & unix.S_IFMT
 	if typeBits == unix.S_IFLNK {
-		target, err := readlinkAt(parentFD, name)
+		target, err := readlinkFD(fd)
 		if err != nil {
 			unix.Close(fd)
 			return rootfsEntry{}, err
@@ -235,9 +247,9 @@ func openRelativeEntry(rootFD int, relative string) (rootfsEntry, error) {
 	return openEntryAt(parentFD, parts[len(parts)-1])
 }
 
-func readlinkAt(parentFD int, name string) (string, error) {
+func readlinkFD(fd int) (string, error) {
 	buffer := make([]byte, 4096)
-	count, err := unix.Readlinkat(parentFD, name, buffer)
+	count, err := unix.Readlinkat(fd, "", buffer)
 	if err != nil {
 		return "", err
 	}
@@ -247,7 +259,10 @@ func readlinkAt(parentFD int, name string) (string, error) {
 	return string(buffer[:count]), nil
 }
 
-func readDirectoryNames(fd int) ([]string, error) {
+func readDirectoryNames(fd int, allowance int) ([]string, error) {
+	if allowance < 0 {
+		return nil, fmt.Errorf("rootfs directory exceeds the entry limit")
+	}
 	duplicate, err := unix.Dup(fd)
 	if err != nil {
 		return nil, err
@@ -257,9 +272,40 @@ func readDirectoryNames(fd int) ([]string, error) {
 		unix.Close(duplicate)
 		return nil, fmt.Errorf("cannot duplicate rootfs directory")
 	}
-	entries, readErr := file.ReadDir(-1)
+	entries, readErr := file.ReadDir(allowance + 1)
 	closeErr := file.Close()
-	if readErr != nil {
+	if readErr != nil && readErr != io.EOF {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if len(entries) > allowance {
+		return nil, fmt.Errorf("rootfs directory exceeds the entry limit")
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+const cleanupDirectoryBatch = 64
+
+func readDirectoryBatch(fd int) ([]string, error) {
+	duplicate, err := unix.Dup(fd)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(duplicate), "rootfs-cleanup-directory")
+	if file == nil {
+		unix.Close(duplicate)
+		return nil, fmt.Errorf("cannot duplicate rootfs cleanup directory")
+	}
+	entries, readErr := file.ReadDir(cleanupDirectoryBatch)
+	closeErr := file.Close()
+	if readErr != nil && readErr != io.EOF {
 		return nil, readErr
 	}
 	if closeErr != nil {
@@ -269,6 +315,5 @@ func readDirectoryNames(fd int) ([]string, error) {
 	for _, entry := range entries {
 		names = append(names, entry.Name())
 	}
-	sort.Strings(names)
 	return names, nil
 }
