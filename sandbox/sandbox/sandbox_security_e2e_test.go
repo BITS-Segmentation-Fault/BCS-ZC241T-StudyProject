@@ -21,6 +21,7 @@ type securitySandboxConfig struct {
 	memoryGB     int
 	maxProcesses int
 	binds        []securityBind
+	dns          []string
 }
 
 type securityBind struct {
@@ -227,6 +228,7 @@ func writeSecuritySandboxConfig(t *testing.T, rootfs, mode string, args []string
 		"network_mode: " + mode,
 		"working_dir: /work",
 		"rootfs_source: " + strconv.Quote(rootfs),
+		"dns_servers: " + quoteList(options.dns),
 	}
 	if len(options.binds) == 0 {
 		lines = append(lines, "bind_mounts: []")

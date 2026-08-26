@@ -64,31 +64,13 @@ func Child(p2cRFd, c2pWFd int) int {
 
 	}
 
-	if err := fs.IsolateRootFS(cfg.RootFSSource, cfg.BindMounts); err != nil {
+	if err := fs.IsolateRootFS(cfg.RootFSSource, cfg.BindMounts, cfg.ReadOnlyRoot, cfg.DNSServers); err != nil {
 		childLog(fmt.Sprintf("JAIL FAILURE: %v", err))
 		return 1
 	}
 
-	if len(cfg.DNSServers) > 0 {
-		var lines []string
-		for _, dns := range cfg.DNSServers {
-			lines = append(lines, "nameserver "+dns)
-		}
-		if err := fs.WriteTextNoSymlinks("/etc/resolv.conf", strings.Join(lines, "\n")+"\n"); err != nil {
-			childLog(fmt.Sprintf("NETWORK FAILURE: DNS configuration: %v", err))
-			return 1
-		}
-	}
-
-	if cfg.ReadOnlyRoot {
-		if err := syscall.Mount("", "/", "", syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_BIND, ""); err != nil {
-			childLog(fmt.Sprintf("JAIL FAILURE: read-only root: %v", err))
-			return 1
-		}
-	}
-
 	if cfg.WorkingDir != "" {
-		if err := fs.ChdirNoSymlinks(cfg.WorkingDir); err != nil {
+		if err := os.Chdir(cfg.WorkingDir); err != nil {
 			childLog(fmt.Sprintf("JAIL FAILURE: working directory: %v", err))
 			return 1
 		}

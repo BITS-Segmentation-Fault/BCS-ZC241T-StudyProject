@@ -95,6 +95,17 @@ func makeProbeRootfs(t *testing.T, probe string) string {
 	if err := os.MkdirAll(filepath.Join(rootfs, "bin", "work"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	for _, directory := range []string{"etc", "mnt", "proc"} {
+		if err := os.Mkdir(filepath.Join(rootfs, directory), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "etc", "resolv.conf"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "mnt", "bound"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
 	data, err := os.ReadFile(probe)
 	if err != nil {
 		t.Fatal(err)

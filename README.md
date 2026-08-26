@@ -78,10 +78,15 @@ then repeats the launch with unusable proxy settings to verify offline reuse.
 
 The program is Linux-only. Host and none modes are designed to work without
 global root when unprivileged user namespaces, mount namespaces, PID/UTS
-namespaces, `pivot_root`, `openat2`, seccomp, and the required kernel policy
-are available. The configured rootfs must contain the command and its runtime
+namespaces, `pivot_root`, `openat2`, the Linux new mount API
+(`open_tree`, `mount_setattr`, `move_mount`, and
+`fsopen`/`fsconfig`/`fsmount`), seccomp, and the required kernel policy are
+available.
+The configured rootfs must contain the command and its runtime
 files; statically linked payloads are the simplest option. `/proc` is mounted
-by the sandbox.
+by the sandbox. The rootfs must already contain `/proc`, and must already
+contain `/etc/resolv.conf` when DNS servers are configured. Every bind target
+must also exist and match the source type; setup never creates target paths.
 
 Bridge mode additionally requires root or `CAP_NET_ADMIN`, the `ip` command,
 and `iptables`. It creates uniquely named links and owned NAT rules and rolls
