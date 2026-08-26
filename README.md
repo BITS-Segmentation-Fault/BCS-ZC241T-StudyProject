@@ -22,6 +22,12 @@ Use a temporary output path when a standalone executable is needed:
 go build -o "${TMPDIR:-/tmp}/sandbox" .
 ```
 
+With a freshly built binary, the equivalent first-run command is:
+
+```bash
+./sandbox-bin --network-mode=none -- /bin/echo "hello world"
+```
+
 Bazel mirrors the module and packages the executable without writing build
 outputs into the source tree:
 
@@ -33,6 +39,40 @@ bazel build //pkg:study_project_dist
 
 The distribution archive contains the executable at `sandbox/sandbox` with
 its executable permission preserved.
+
+## Managed rootfs
+
+If `rootfs_source` is omitted or empty, the host-side parent provisions the
+managed rootfs before creating cgroups, network resources, or namespaces. This
+also applies when the requested network mode is `none`. The first launch
+downloads the pinned Alpine 3.24.1 minirootfs archive over HTTPS, verifies its
+embedded SHA-256 digest, securely extracts it, writes a manifest, and publishes
+it atomically. Later launches reuse the verified cache and work offline.
+
+The cache is under `os.UserCacheDir()`:
+
+```text
+<user-cache>/bcs-zc241t-sandbox/rootfs/alpine/3.24.1/x86_64
+<user-cache>/bcs-zc241t-sandbox/rootfs/alpine/3.24.1/aarch64
+```
+
+Go `amd64` maps to Alpine `x86_64`, and Go `arm64` maps to Alpine `aarch64`.
+Other architectures are rejected before any network request. The archive name,
+size ceiling, release URL, and digest are pinned in reviewed Go source; the
+mutable `latest-stable` release path is not used.
+
+To force a fresh managed download, remove the matching managed architecture
+directory and launch again. A custom non-empty `rootfs_source` is user-managed:
+it must already exist, is never downloaded or repaired, and is not modified by
+the provisioning code. The payload must be present in the selected rootfs;
+`/bin/echo` is available in the managed Alpine rootfs.
+
+The namespace-free archive maintenance check can be run with
+`SANDBOX_ALPINE_MAINTENANCE=1`; it downloads both pinned archives, verifies
+their archive digests, extracts their production layouts, and verifies their
+tree digests. The managed-rootfs E2E check can be enabled with
+`SANDBOX_MANAGED_ROOTFS_E2E=1`; it uses a fresh temporary `XDG_CACHE_HOME`,
+then repeats the launch with unusable proxy settings to verify offline reuse.
 
 ## Platform and runtime requirements
 

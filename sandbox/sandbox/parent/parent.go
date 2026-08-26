@@ -16,6 +16,7 @@ import (
 	"sandbox/sandbox/config"
 	"sandbox/sandbox/network"
 	"sandbox/sandbox/resources"
+	"sandbox/sandbox/rootfs"
 	"sandbox/sandbox/security"
 )
 
@@ -28,6 +29,20 @@ func Parent(cfg config.Config) int {
 	}
 	if err := security.ValidateSyscallNames(cfg.BlockedSyscalls); err != nil {
 		log.Printf("[PRE-FLIGHT ERROR] invalid syscall policy: %v", err)
+		return 1
+	}
+	resolvedRootFS, err := (rootfs.Provisioner{}).Resolve(cfg.RootFSSource)
+	if err != nil {
+		log.Printf("[PRE-FLIGHT ERROR] rootfs cannot be provisioned: %v", err)
+		return 1
+	}
+	cfg.RootFSSource = resolvedRootFS
+	if err := cfg.Validate(); err != nil {
+		log.Printf("[PRE-FLIGHT ERROR] resolved configuration is invalid: %v", err)
+		return 1
+	}
+	if err := security.ValidateSyscallNames(cfg.BlockedSyscalls); err != nil {
+		log.Printf("[PRE-FLIGHT ERROR] resolved syscall policy is invalid: %v", err)
 		return 1
 	}
 	cpuLimit, err := resources.PrepareCPULimit(cfg.CPULimitPercent)

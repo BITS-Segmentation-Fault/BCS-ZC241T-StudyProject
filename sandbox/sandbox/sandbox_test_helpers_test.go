@@ -132,3 +132,23 @@ func namespacesAvailable(t *testing.T) {
 		skipOrFail(t, fmt.Sprintf("user namespaces are unavailable: %v", err))
 	}
 }
+
+func withEnvironment(environment []string, key, value string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(environment)+1)
+	set := false
+	for _, entry := range environment {
+		if strings.HasPrefix(entry, prefix) {
+			if !set {
+				result = append(result, prefix+value)
+				set = true
+			}
+			continue
+		}
+		result = append(result, entry)
+	}
+	if !set {
+		result = append(result, prefix+value)
+	}
+	return result
+}

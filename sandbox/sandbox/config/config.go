@@ -90,7 +90,7 @@ func DefaultConfig() Config {
 		NetworkMode:          network.None,
 		BridgeConfig:         network.DefaultBridgeConfig(),
 		WorkingDir:           "/",
-		RootFSSource:         "/var/lib/sandbox/rootfs",
+		RootFSSource:         "",
 	}
 }
 

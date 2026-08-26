@@ -21,7 +21,7 @@ func TestDefaultConfig(t *testing.T) {
 	if len(c.EnvVars) != 1 || c.EnvVars[0] != "PATH=/bin:/usr/bin" || c.CPULimitPercent != 0 || c.MemoryLimitGB != 1 || c.MaxProcesses != 100 || c.FileSizeLimitMB != 100 {
 		t.Fatalf("unexpected resource/environment defaults: %+v", c)
 	}
-	if c.RootFSSource != "/var/lib/sandbox/rootfs" || len(c.DropCapabilities) != 1 || c.DropCapabilities[0] != "ALL" {
+	if c.RootFSSource != "" || len(c.DropCapabilities) != 1 || c.DropCapabilities[0] != "ALL" {
 		t.Fatalf("unexpected rootfs/capability defaults: %+v", c)
 	}
 }
