@@ -70,7 +70,7 @@ func Child(p2cRFd int) int {
 		return 1
 	}
 
-	if err := security.ApplySeccompFiltersCustom(cfg.BlockedSyscallAction, cfg.BlockedSyscalls); err != nil {
+	if err := security.ApplySeccompFilter(cfg.BlockedSyscallAction, cfg.BlockedSyscalls); err != nil {
 		childLog(fmt.Sprintf("SECCOMP FAILURE: %v", err))
 		return 1
 	}
