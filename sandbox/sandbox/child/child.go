@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strconv"
 	"strings"
@@ -49,6 +50,7 @@ func Child(p2cRFd, c2pWFd int) int {
 		childLog(fmt.Sprintf("CONFIGURATION FAILURE: %v", err))
 		return 1
 	}
+	_ = unix.Close(c2pWFd)
 
 	if err := resources.ApplyFileSizeLimit(cfg.FileSizeLimitMB); err != nil {
 		childLog(fmt.Sprintf("RESOURCE FAILURE: %v", err))
@@ -67,12 +69,6 @@ func Child(p2cRFd, c2pWFd int) int {
 		}
 	}
 
-	// CLEANUP: Close all inherited host file descriptors after synchronization.
-	for fd := 3; fd < 1024; fd++ {
-		_ = syscall.Close(fd)
-	}
-
-	// Configure the moved interface only after the parent has acknowledged setup.
 	if cfg.NetworkMode == network.Bridge {
 		if err := network.ConfigureChildIface(cfg.BridgeConfig); err != nil {
 			childLog(fmt.Sprintf("Bridge config failed: %v", err))
@@ -81,8 +77,6 @@ func Child(p2cRFd, c2pWFd int) int {
 		childLog("Bridge interface configured.")
 
 	}
-
-	// ... (Rest of your function: CAPABILITIES, JAIL, SECCOMP, EXEC)
 
 	if err := fs.IsolateRootFS(cfg.RootFSSource, cfg.BindMounts); err != nil {
 		childLog(fmt.Sprintf("JAIL FAILURE: %v", err))
@@ -148,9 +142,69 @@ func Child(p2cRFd, c2pWFd int) int {
 	}
 
 	childLog(fmt.Sprintf("Handing off to %q", binaryPath))
-	err = unix.Exec(binaryPath, execArgs, cfg.Environment(os.Environ()))
-	childLog(fmt.Sprintf("EXEC FAILED: %v", err))
+	return runInit(binaryPath, execArgs, cfg.Environment(os.Environ()))
+}
+
+// runInit keeps the payload in the namespace init process group. The parent
+// therefore reaches both processes with the same group-directed signal.
+func runInit(binary string, command, environment []string) int {
+	if len(command) == 0 {
+		return 127
+	}
+	signals := make(chan os.Signal, 8)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	defer signal.Stop(signals)
+
+	payload := exec.Command(binary, command[1:]...)
+	payload.Stdin, payload.Stdout, payload.Stderr = os.Stdin, os.Stdout, os.Stderr
+	payload.Env = environment
+	if err := payload.Start(); err != nil {
+		childLog(fmt.Sprintf("EXEC FAILED: %v", err))
+		return 127
+	}
+	deliverQueuedSignals(signals, payload.Process.Pid)
+	status, err := reapUntilPayloadExits(payload.Process.Pid)
+	_ = payload.Process.Release()
+	if err != nil {
+		childLog(fmt.Sprintf("INIT wait failed: %v", err))
+		return 1
+	}
+	if status.Exited() {
+		return status.ExitStatus()
+	}
+	if status.Signaled() {
+		return 128 + int(status.Signal())
+	}
 	return 1
+}
+
+func deliverQueuedSignals(signals <-chan os.Signal, payloadPID int) {
+	for {
+		select {
+		case received := <-signals:
+			if sig, ok := received.(syscall.Signal); ok {
+				_ = syscall.Kill(payloadPID, sig)
+			}
+		default:
+			return
+		}
+	}
+}
+
+func reapUntilPayloadExits(payloadPID int) (syscall.WaitStatus, error) {
+	for {
+		var status syscall.WaitStatus
+		pid, err := syscall.Wait4(-1, &status, 0, nil)
+		if err == syscall.EINTR {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		if pid == payloadPID {
+			return status, nil
+		}
+	}
 }
 
 func waitForParentSetup(readFD, writeFD int) error {
