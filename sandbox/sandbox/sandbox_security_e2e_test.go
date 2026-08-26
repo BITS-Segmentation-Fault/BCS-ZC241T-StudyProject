@@ -284,12 +284,3 @@ func writeSecuritySandboxConfig(t *testing.T, rootfs, mode string, args []string
 	}
 	return path
 }
-
-func findLine(output, prefix string) string {
-	for _, line := range strings.Split(output, "\n") {
-		if strings.HasPrefix(line, prefix) {
-			return line
-		}
-	}
-	return ""
-}

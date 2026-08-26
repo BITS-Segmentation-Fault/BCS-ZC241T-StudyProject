@@ -110,6 +110,15 @@ func anySuffix(value string, suffixes []string) bool {
 	return false
 }
 
+func findLine(output, prefix string) string {
+	for _, line := range strings.Split(output, "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
+}
+
 func skipOrFail(t *testing.T, reason string) {
 	t.Helper()
 	if value := os.Getenv("SANDBOX_E2E_REQUIRED"); value == "1" || strings.EqualFold(value, "true") {

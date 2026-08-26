@@ -18,6 +18,9 @@ func main() {
 	userNS, _ := os.Readlink("/proc/self/ns/user")
 	pidNS, _ := os.Readlink("/proc/self/ns/pid")
 	fmt.Printf("uid=%d gid=%d pid=%d ppid=%d cwd=%s netns=%s userns=%s pidns=%s env=%s\n", os.Getuid(), os.Getgid(), os.Getpid(), os.Getppid(), cwd, netNS, userNS, pidNS, os.Getenv("PROBE_VALUE"))
+	fmt.Printf("uid_map=%s\n", normalizedProcFile("/proc/self/uid_map"))
+	fmt.Printf("gid_map=%s\n", normalizedProcFile("/proc/self/gid_map"))
+	fmt.Printf("setgroups=%s\n", normalizedProcFile("/proc/self/setgroups"))
 	for _, arg := range os.Args[1:] {
 		if strings.HasPrefix(arg, "--exit=") {
 			code, _ := strconv.Atoi(strings.TrimPrefix(arg, "--exit="))
@@ -58,6 +61,14 @@ func main() {
 			probeProcesses(strings.TrimPrefix(arg, "--spawn-processes="))
 		}
 	}
+}
+
+func normalizedProcFile(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Sprintf("error:%v", err)
+	}
+	return strings.Join(strings.Fields(string(data)), " ")
 }
 
 func printCapabilityStatus() {
