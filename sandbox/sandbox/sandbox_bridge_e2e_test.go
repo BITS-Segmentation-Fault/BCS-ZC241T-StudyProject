@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +31,9 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 		if _, err := exec.LookPath("unshare"); err != nil {
 			skipOrFail(t, "unshare is unavailable for the isolated bridge E2E")
 		}
+		if err := exec.Command("unshare", "-Urn", "true").Run(); err != nil {
+			skipOrFail(t, fmt.Sprintf("isolated bridge namespace is unavailable: %v", err))
+		}
 		command := exec.Command("unshare", "-Urn", os.Args[0], "-test.run=TestSandboxPrivilegedBridgeLifecycle", "-test.v")
 		command.Env = withEnvironment(os.Environ(), "SANDBOX_BRIDGE_E2E_INNER", "1")
 		output, err := command.CombinedOutput()
@@ -36,9 +41,6 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 			skipOrFail(t, reason)
 		}
 		if err != nil {
-			if strings.Contains(string(output), "Operation not permitted") || strings.Contains(string(output), "unshare") {
-				skipOrFail(t, string(output))
-			}
 			t.Fatalf("isolated bridge E2E failed: %v\n%s", err, output)
 		}
 		return
@@ -61,37 +63,70 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 	linksBefore := bridgeCommandOutput(t, "ip", "-o", "link", "show")
 	firewallSave := trustedBridgeTool(t, "iptables-save")
 	firewallBefore := normalizeFirewallSnapshot(bridgeCommandOutputPath(t, firewallSave))
-	firstConfig := writeSandboxConfig(t, rootfs, "bridge", "--sleep=10")
-	first := exec.Command(sandbox, "--config", firstConfig)
-	var firstOutput bytes.Buffer
-	first.Stdout, first.Stderr = &firstOutput, &firstOutput
-	if err := first.Start(); err != nil {
+	first := newSandboxConfig(rootfs, "bridge", "/bin/probe", "inspect", "10s")
+	firstConfig := writeSandboxConfig(t, first)
+	firstCommand := exec.Command(sandbox, "--config", firstConfig)
+	firstStdout, err := firstCommand.StdoutPipe()
+	if err != nil {
+		t.Fatalf("create first bridge stdout pipe: %v", err)
+	}
+	var firstStderr bytes.Buffer
+	firstCommand.Stderr = &firstStderr
+	if err := firstCommand.Start(); err != nil {
 		t.Fatalf("start first bridge sandbox: %v", err)
 	}
-	secondConfig := writeSandboxConfig(t, rootfs, "bridge", "--sleep=10")
-	second := exec.Command(sandbox, "--config", secondConfig,
-		"--bridge-subnet", "10.0.101.0/24",
-		"--bridge-gateway", "10.0.101.1",
-		"--bridge-container-ip", "10.0.101.2")
-	var secondOutput bytes.Buffer
-	second.Stdout, second.Stderr = &secondOutput, &secondOutput
-	if err := second.Start(); err != nil {
-		_ = first.Process.Kill()
-		_ = first.Wait()
+	firstCapture := captureBridgeProbe(firstStdout)
+	second := newSandboxConfig(rootfs, "bridge", "/bin/probe", "inspect", "10s")
+	second.BridgeConfig.Subnet = "10.0.101.0/24"
+	second.BridgeConfig.GatewayIP = "10.0.101.1"
+	second.BridgeConfig.ContainerIP = "10.0.101.2"
+	secondConfig := writeSandboxConfig(t, second)
+	secondCommand := exec.Command(sandbox, "--config", secondConfig)
+	secondStdout, err := secondCommand.StdoutPipe()
+	if err != nil {
+		_ = firstCommand.Process.Kill()
+		_ = firstCommand.Wait()
+		t.Fatalf("create second bridge stdout pipe: %v", err)
+	}
+	var secondStderr bytes.Buffer
+	secondCommand.Stderr = &secondStderr
+	if err := secondCommand.Start(); err != nil {
+		_ = firstCommand.Process.Kill()
+		_ = firstCommand.Wait()
 		t.Fatalf("start second bridge sandbox: %v", err)
 	}
+	secondCapture := captureBridgeProbe(secondStdout)
+	var firstWaited, secondWaited bool
+	cleanup := func() {
+		if firstCommand.Process != nil && !firstWaited {
+			_ = firstCommand.Process.Kill()
+			_ = firstCommand.Wait()
+			firstWaited = true
+		}
+		if secondCommand.Process != nil && !secondWaited {
+			_ = secondCommand.Process.Kill()
+			_ = secondCommand.Wait()
+			secondWaited = true
+		}
+	}
 	t.Cleanup(func() {
-		_ = first.Process.Kill()
-		_ = second.Process.Kill()
-		_ = first.Wait()
-		_ = second.Wait()
+		cleanup()
 	})
+	if err := firstCapture.waitReady(); err != nil {
+		cleanup()
+		t.Fatalf("first bridge probe did not reach readiness: %v\nstdout=%s\nstderr=%s", err, firstCapture.output(), firstStderr.String())
+	}
+	if err := secondCapture.waitReady(); err != nil {
+		cleanup()
+		t.Fatalf("second bridge probe did not reach readiness: %v\nstdout=%s\nstderr=%s", err, secondCapture.output(), secondStderr.String())
+	}
 	expectations := []bridgeFirewallExpectation{
 		{subnet: "10.0.100.0/24"},
 		{subnet: "10.0.101.0/24"},
 	}
 	if err := waitForBridgeRules(firewallSave, expectations); err != nil {
-		t.Fatalf("bridge firewall rules were not installed: %v\n%s\n%s", err, firstOutput.String(), secondOutput.String())
+		cleanup()
+		t.Fatalf("bridge firewall rules were not installed: %v\nfirst stdout=%s\nsecond stdout=%s\nfirst stderr=%s\nsecond stderr=%s", err, firstCapture.output(), secondCapture.output(), firstStderr.String(), secondStderr.String())
 	}
 	linkNames := parseLinkNames(bridgeCommandOutput(t, "ip", "-o", "link", "show"))
 	var bridges []string
@@ -101,17 +136,20 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 		}
 	}
 	if len(bridges) != 2 {
+		cleanup()
 		t.Fatalf("bridge links = %v, want two owned bridges", bridges)
 	}
-	_ = first.Process.Signal(os.Interrupt)
-	_ = second.Process.Signal(os.Interrupt)
-	firstErr := first.Wait()
-	secondErr := second.Wait()
+	_ = firstCommand.Process.Signal(os.Interrupt)
+	_ = secondCommand.Process.Signal(os.Interrupt)
+	firstErr := firstCommand.Wait()
+	firstWaited = true
+	secondErr := secondCommand.Wait()
+	secondWaited = true
 	if firstErr == nil || secondErr == nil {
-		t.Fatalf("sleeping bridge sandboxes did not terminate: first=%v second=%v", firstErr, secondErr)
+		t.Fatalf("bridge sandboxes did not terminate: first=%v second=%v\nfirst stdout=%s\nsecond stdout=%s", firstErr, secondErr, firstCapture.output(), secondCapture.output())
 	}
-	assertBridgePayload(t, firstOutput.String(), "10.0.100.2/24", "10.0.100.1")
-	assertBridgePayload(t, secondOutput.String(), "10.0.101.2/24", "10.0.101.1")
+	assertBridgePayload(t, firstCapture.output(), "10.0.100.2/24", "10.0.100.1")
+	assertBridgePayload(t, secondCapture.output(), "10.0.101.2/24", "10.0.101.1")
 	linksAfter := bridgeCommandOutput(t, "ip", "-o", "link", "show")
 	if string(linksBefore) != string(linksAfter) {
 		t.Fatalf("host links changed across bridge lifecycle:\nbefore=%safter=%s", linksBefore, linksAfter)
@@ -124,6 +162,73 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 
 type bridgeFirewallExpectation struct {
 	subnet string
+}
+
+type bridgeProbeResult struct {
+	output string
+	ready  bool
+	err    error
+}
+
+type bridgeProbeCapture struct {
+	ready  chan struct{}
+	done   chan bridgeProbeResult
+	result *bridgeProbeResult
+}
+
+func captureBridgeProbe(stdout io.ReadCloser) *bridgeProbeCapture {
+	capture := &bridgeProbeCapture{
+		ready: make(chan struct{}),
+		done:  make(chan bridgeProbeResult, 1),
+	}
+	go func() {
+		var output bytes.Buffer
+		reader := bufio.NewReader(stdout)
+		ready := false
+		var readErr error
+		for {
+			line, err := reader.ReadString('\n')
+			if line != "" {
+				output.WriteString(line)
+				if line == "ready\n" && !ready {
+					ready = true
+					close(capture.ready)
+				}
+			}
+			if err != nil {
+				if err != io.EOF {
+					readErr = err
+				}
+				break
+			}
+		}
+		if !ready && readErr == nil {
+			readErr = errors.New("stdout closed before ready")
+		}
+		capture.done <- bridgeProbeResult{output: output.String(), ready: ready, err: readErr}
+	}()
+	return capture
+}
+
+func (capture *bridgeProbeCapture) waitReady() error {
+	select {
+	case <-capture.ready:
+		return nil
+	case result := <-capture.done:
+		capture.result = &result
+		if result.ready {
+			return nil
+		}
+		return result.err
+	}
+}
+
+func (capture *bridgeProbeCapture) output() string {
+	if capture.result == nil {
+		result := <-capture.done
+		capture.result = &result
+	}
+	return capture.result.output
 }
 
 func waitForBridgeRules(path string, expectations []bridgeFirewallExpectation) error {
@@ -256,9 +361,8 @@ func assertBridgePayload(t *testing.T, output, ipv4, gateway string) {
 	if line := findLine(output, "ipv6="); line != "ipv6=none" {
 		t.Fatalf("IPv6 state = %q, want none\n%s", line, output)
 	}
-	identity := findLine(output, "uid=")
-	if !strings.Contains(identity, "pid=2 ppid=1") {
-		t.Fatalf("payload identity = %q, want namespace pid=2 and ppid=1\n%s", identity, output)
+	if identity := findLine(output, "identity="); identity != "identity=uid=0 gid=0 pid=2 ppid=1 cwd=/work" {
+		t.Fatalf("payload identity = %q, want namespace PID 2 and PPID 1\n%s", identity, output)
 	}
 }
 

@@ -8,8 +8,38 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+
+	"gopkg.in/yaml.v3"
+	"sandbox/sandbox/config"
+	"sandbox/sandbox/network"
 )
+
+var testBinaries struct {
+	sync.Mutex
+	sandbox string
+	probe   string
+}
+
+var testBinaryDir string
+
+func TestMain(m *testing.M) {
+	directory, err := os.MkdirTemp("", "sandbox-test-binaries-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create test binary directory: %v\n", err)
+		os.Exit(1)
+	}
+	testBinaryDir = directory
+	status := m.Run()
+	if err := os.RemoveAll(directory); err != nil {
+		fmt.Fprintf(os.Stderr, "remove test binary directory: %v\n", err)
+		if status == 0 {
+			status = 1
+		}
+	}
+	os.Exit(status)
+}
 
 func sandboxTestBinary(t *testing.T) string {
 	t.Helper()
@@ -19,7 +49,12 @@ func sandboxTestBinary(t *testing.T) string {
 	if binary := findRunfileAny("sandbox/sandbox/sandbox", "sandbox/sandbox/sandbox_/sandbox"); binary != "" {
 		return binary
 	}
-	return buildGoBinary(t, ".", "sandbox")
+	testBinaries.Lock()
+	defer testBinaries.Unlock()
+	if testBinaries.sandbox == "" {
+		testBinaries.sandbox = buildGoBinary(t, ".", "sandbox")
+	}
+	return testBinaries.sandbox
 }
 
 func probeTestBinary(t *testing.T) string {
@@ -30,7 +65,12 @@ func probeTestBinary(t *testing.T) string {
 	if binary := findRunfileAny("sandbox/sandbox/testprobe", "sandbox/sandbox/testprobe_/testprobe"); binary != "" {
 		return binary
 	}
-	return buildGoBinary(t, "./testprobe", "testprobe")
+	testBinaries.Lock()
+	defer testBinaries.Unlock()
+	if testBinaries.probe == "" {
+		testBinaries.probe = buildGoBinary(t, "./testprobe", "testprobe")
+	}
+	return testBinaries.probe
 }
 
 func buildGoBinary(t *testing.T, packagePath, name string) string {
@@ -53,17 +93,17 @@ func buildGoBinary(t *testing.T, packagePath, name string) string {
 	if goTool == "" {
 		t.Fatalf("cannot build %s: the go command is unavailable", name)
 	}
-	out := filepath.Join(t.TempDir(), name)
+	if testBinaryDir == "" {
+		t.Fatal("test binary directory is not initialized")
+	}
+	out := filepath.Join(testBinaryDir, name)
 	cmd := exec.Command(goTool, "build", "-o", out, packagePath)
 	cmd.Dir = moduleDir
+	cmd.Env = withEnvironment(os.Environ(), "CGO_ENABLED", "0")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build %s: %v\n%s", name, err, output)
 	}
 	return out
-}
-
-func findRunfile(name string) string {
-	return findRunfileAny(name)
 }
 
 func findRunfileAny(names ...string) string {
@@ -127,8 +167,60 @@ func skipOrFail(t *testing.T, reason string) {
 	t.Skip(reason)
 }
 
-func writeFile(path, contents string) error {
-	return os.WriteFile(path, []byte(contents), 0600)
+func makeProbeRootfs(t *testing.T, probe string) string {
+	t.Helper()
+	rootfs := filepath.Join(t.TempDir(), "rootfs")
+	for _, directory := range []string{"bin", "etc", "mnt", "proc", "work"} {
+		if err := os.MkdirAll(filepath.Join(rootfs, directory), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "etc", "resolv.conf"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "mnt", "bound"), nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootfs, "bin", "probe"), data, 0755); err != nil {
+		t.Fatal(err)
+	}
+	return rootfs
+}
+
+func newSandboxConfig(rootfs, mode string, command ...string) config.Config {
+	cfg := config.DefaultConfig()
+	cfg.Command = append([]string(nil), command...)
+	cfg.EnvVars = []string{"PATH=/bin:/usr/bin", "PROBE_VALUE=probe-value"}
+	cfg.RootFSSource = rootfs
+	cfg.ReadOnlyRoot = false
+	cfg.NetworkMode = network.NetworkMode(mode)
+	return cfg
+}
+
+func writeSandboxConfig(t *testing.T, cfg config.Config) string {
+	t.Helper()
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "sandbox.yaml")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func namespaceLink(t *testing.T, path string) string {
+	t.Helper()
+	value, err := os.Readlink(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
 }
 
 func namespacesAvailable(t *testing.T) {

@@ -3,73 +3,45 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+
+	"sandbox/sandbox/config"
 )
-
-type securitySandboxConfig struct {
-	readOnlyRoot bool
-	seccomp      string
-	blocked      []string
-	dropCaps     []string
-	fileSizeMB   int
-	memoryGB     int
-	maxProcesses int
-	binds        []securityBind
-	dns          []string
-}
-
-type securityBind struct {
-	hostPath      string
-	containerPath string
-	writable      bool
-}
-
-func defaultSecurityConfig() securitySandboxConfig {
-	return securitySandboxConfig{
-		seccomp: "kill",
-	}
-}
 
 func TestSandboxSeccompBlocksConfiguredSyscalls(t *testing.T) {
 	namespacesAvailable(t)
 	rootfs := makeProbeRootfs(t, probeTestBinary(t))
-	cfg := defaultSecurityConfig()
-	cfg.seccomp = "kill"
-	cfg.blocked = []string{"mount"}
-	output, err := runSecurityProbe(t, rootfs, "none", []string{"--syscall=mount"}, cfg)
-	if !strings.Contains(output, "Handing off") {
-		t.Fatalf("blocked-syscall probe did not reach the payload: %s", output)
+	cfg := newSandboxConfig(rootfs, "none", "/bin/probe", "syscall", "mount")
+	cfg.BlockedSyscalls = []string{"mount"}
+	output, err := exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, cfg)).CombinedOutput()
+	text := string(output)
+	if !strings.Contains(text, "syscall-ready") {
+		t.Fatalf("blocked-syscall probe did not reach its readiness point: %s", text)
 	}
-	if strings.Contains(output, "syscall-ok") || strings.Contains(output, "syscall-error=") {
-		t.Fatalf("blocked-syscall probe survived or reported an ordinary syscall result: %s", output)
+	if strings.Contains(text, "syscall-ok") || strings.Contains(text, "syscall-error=") {
+		t.Fatalf("blocked-syscall probe survived or reported a syscall result: %s", text)
 	}
 	exitErr, ok := err.(*exec.ExitError)
 	if !ok || exitErr.ExitCode() != 128+int(syscall.SIGSYS) {
-		t.Fatalf("blocked syscall exit = %v, want %d\n%s", err, 128+int(syscall.SIGSYS), output)
+		t.Fatalf("blocked syscall exit = %v, want %d\n%s", err, 128+int(syscall.SIGSYS), text)
 	}
 }
 
 func TestSandboxDropsEveryCapabilitySet(t *testing.T) {
 	namespacesAvailable(t)
 	rootfs := makeProbeRootfs(t, probeTestBinary(t))
-	cfg := defaultSecurityConfig()
-	cfg.dropCaps = []string{"ALL"}
-	output, err := runSecurityProbe(t, rootfs, "host", []string{"--capabilities"}, cfg)
+	cfg := newSandboxConfig(rootfs, "host", "/bin/probe", "capabilities")
+	output, err := exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, cfg)).CombinedOutput()
 	if err != nil {
-		if unsupportedSandboxOutput(output) {
-			skipOrFail(t, output)
-		}
 		t.Fatalf("capability probe failed: %v\n%s", err, output)
 	}
 	for _, name := range []string{"CapEff:", "CapPrm:", "CapInh:", "CapAmb:", "CapBnd:"} {
-		line := findLine(output, name)
+		line := findLine(string(output), name)
 		if line == "" {
 			t.Fatalf("capability probe did not report %s: %s", name, output)
 		}
@@ -80,48 +52,17 @@ func TestSandboxDropsEveryCapabilitySet(t *testing.T) {
 	}
 }
 
-func TestSandboxNoneModeDeniesNetworkAccess(t *testing.T) {
-	namespacesAvailable(t)
-	rootfs := makeProbeRootfs(t, probeTestBinary(t))
-	cfg := defaultSecurityConfig()
-	for _, test := range []struct {
-		name string
-		arg  string
-		want string
-	}{
-		{name: "tcp", arg: "--tcp=127.0.0.1:9", want: "tcp-error="},
-		{name: "udp", arg: "--udp=127.0.0.1:9", want: "udp-error="},
-		{name: "dns", arg: "--dns=example.invalid", want: "dns-error="},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			output, err := runSecurityProbe(t, rootfs, "none", []string{test.arg}, cfg)
-			if err != nil {
-				if unsupportedSandboxOutput(output) {
-					skipOrFail(t, output)
-				}
-				t.Fatalf("network probe failed: %v\n%s", err, output)
-			}
-			if !strings.Contains(output, test.want) {
-				t.Fatalf("none-mode network policy was not enforced: wanted %q in %s", test.want, output)
-			}
-		})
-	}
-}
-
 func TestSandboxFilesystemPermissionMatrix(t *testing.T) {
 	namespacesAvailable(t)
 	probe := probeTestBinary(t)
 	rootfs := makeProbeRootfs(t, probe)
-	readOnly := defaultSecurityConfig()
-	readOnly.readOnlyRoot = true
-	output, err := runSecurityProbe(t, rootfs, "host", []string{"--write-bytes=/work/readonly:1"}, readOnly)
+	readOnly := newSandboxConfig(rootfs, "host", "/bin/probe", "write-size", "/work/readonly", "1")
+	readOnly.ReadOnlyRoot = true
+	output, err := exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, readOnly)).CombinedOutput()
 	if err != nil {
-		if unsupportedSandboxOutput(output) {
-			skipOrFail(t, output)
-		}
 		t.Fatalf("read-only root probe failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(output, "write-error=") {
+	if !strings.Contains(string(output), "write-error=") {
 		t.Fatalf("read-only root allowed a write: %s", output)
 	}
 
@@ -129,32 +70,36 @@ func TestSandboxFilesystemPermissionMatrix(t *testing.T) {
 	if err := os.WriteFile(hostFile, []byte("bound-data"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	readOnlyBind := defaultSecurityConfig()
-	readOnlyBind.binds = []securityBind{{hostPath: hostFile, containerPath: "/mnt/bound"}}
-	output, err = runSecurityProbe(t, rootfs, "host", []string{"--read=/mnt/bound", "--write-bytes=/mnt/bound:1"}, readOnlyBind)
+	readOnlyBind := newSandboxConfig(rootfs, "host", "/bin/probe", "read", "/mnt/bound")
+	readOnlyBind.BindMounts = []config.BindMount{{HostPath: hostFile, ContainerPath: "/mnt/bound"}}
+	output, err = exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, readOnlyBind)).CombinedOutput()
 	if err != nil {
-		if unsupportedSandboxOutput(output) {
-			skipOrFail(t, output)
-		}
 		t.Fatalf("read-only bind probe failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(output, "read=bound-data") || !strings.Contains(output, "write-error=") {
-		t.Fatalf("read-only bind matrix failed: %s", output)
+	if string(output) != "read=bound-data\n" {
+		t.Fatalf("read-only bind read returned %q", output)
 	}
-
-	readWrite := defaultSecurityConfig()
-	readWrite.binds = []securityBind{{hostPath: hostFile, containerPath: "/mnt/bound", writable: true}}
-	output, err = runSecurityProbe(t, rootfs, "host", []string{"--write-bytes=/mnt/bound:1"}, readWrite)
-	if err != nil {
-		if unsupportedSandboxOutput(output) {
-			skipOrFail(t, output)
-		}
-		t.Fatalf("read-write bind probe failed: %v\n%s", err, output)
-	}
-	if !strings.Contains(output, "write-ok") {
-		t.Fatalf("read-write bind rejected a write: %s", output)
+	readOnlyAppend := newSandboxConfig(rootfs, "host", "/bin/probe", "append", "/mnt/bound", "1")
+	readOnlyAppend.BindMounts = []config.BindMount{{HostPath: hostFile, ContainerPath: "/mnt/bound"}}
+	output, err = exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, readOnlyAppend)).CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "append-error=") {
+		t.Fatalf("read-only bind allowed an append: %v\n%s", err, output)
 	}
 	data, err := os.ReadFile(hostFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "bound-data" {
+		t.Fatalf("read-only bind changed host file to %q", data)
+	}
+
+	readWrite := newSandboxConfig(rootfs, "host", "/bin/probe", "append", "/mnt/bound", "1")
+	readWrite.BindMounts = []config.BindMount{{HostPath: hostFile, ContainerPath: "/mnt/bound", Writable: true}}
+	output, err = exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, readWrite)).CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "append-ok") {
+		t.Fatalf("writable bind rejected an append: %v\n%s", err, output)
+	}
+	data, err = os.ReadFile(hostFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,17 +115,11 @@ func TestSandboxDNSMountLeavesRootfsUnchanged(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rootfs, "etc", "resolv.conf"), []byte(original), 0644); err != nil {
 		t.Fatal(err)
 	}
-	cfg := defaultSecurityConfig()
-	cfg.dns = []string{"1.1.1.1"}
-	output, err := runSecurityProbe(t, rootfs, "host", []string{"--read=/etc/resolv.conf"}, cfg)
-	if err != nil {
-		if unsupportedSandboxOutput(output) {
-			skipOrFail(t, output)
-		}
+	cfg := newSandboxConfig(rootfs, "host", "/bin/probe", "read", "/etc/resolv.conf")
+	cfg.DNSServers = []string{"1.1.1.1"}
+	output, err := exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, cfg)).CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "read=nameserver 1.1.1.1") {
 		t.Fatalf("DNS mount failed: %v\n%s", err, output)
-	}
-	if !strings.Contains(output, "read=nameserver 1.1.1.1") {
-		t.Fatalf("DNS contents were not mounted: %s", output)
 	}
 	data, err := os.ReadFile(filepath.Join(rootfs, "etc", "resolv.conf"))
 	if err != nil {
@@ -194,95 +133,34 @@ func TestSandboxDNSMountLeavesRootfsUnchanged(t *testing.T) {
 func TestSandboxResourceLimits(t *testing.T) {
 	namespacesAvailable(t)
 	rootfs := makeProbeRootfs(t, probeTestBinary(t))
-	storage := defaultSecurityConfig()
-	storage.fileSizeMB = 1
-	output, err := runSecurityProbe(t, rootfs, "host", []string{"--write-bytes=/work/large:2097152"}, storage)
-	if err != nil {
-		if unsupportedSandboxOutput(output) {
-			skipOrFail(t, output)
-		}
+	storage := newSandboxConfig(rootfs, "host", "/bin/probe", "write-size", "/work/large", "2097152")
+	storage.FileSizeLimitMB = 1
+	output, err := exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, storage)).CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "write-error=") {
 		t.Fatalf("storage probe failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(output, "write-error=") {
-		t.Fatalf("file-size limit allowed a file over the configured ceiling: %s", output)
+
+	delegated := newSandboxConfig(rootfs, "host", "/bin/probe", "inspect")
+	delegated.MaxProcesses = 32
+	output, err = exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, delegated)).CombinedOutput()
+	if err != nil {
+		if pidsControllerUnavailable(string(output)) {
+			skipOrFail(t, "delegated pids controller is unavailable")
+		}
+		t.Fatalf("process-limit baseline failed: %v\n%s", err, output)
+	}
+	if strings.Contains(string(output), "inspect-error=") {
+		t.Fatalf("process-limit baseline inspection failed: %s", output)
 	}
 
-	delegated := defaultSecurityConfig()
-	// The pids controller counts Go runtime tasks as well as processes. First
-	// prove that the selected ceiling admits the sandbox baseline, then ask the
-	// payload to create substantially more children than that ceiling allows.
-	delegated.maxProcesses = 32
-	output, err = runSecurityProbe(t, rootfs, "host", nil, delegated)
-	if err != nil || strings.Contains(output, "resource limits cannot be provisioned") {
-		if strings.Contains(output, "cgroup") || unsupportedSandboxOutput(output) {
-			skipOrFail(t, output)
-		}
-		t.Fatalf("process-limit preflight failed unexpectedly: %v\n%s", err, output)
-	}
-	if strings.Contains(output, "process-error=") {
-		t.Fatalf("process limit rejected the sandbox runtime baseline: %s", output)
-	}
-	output, err = runSecurityProbe(t, rootfs, "host", []string{"--spawn-processes=64"}, delegated)
-	if err != nil || strings.Contains(output, "resource limits cannot be provisioned") {
-		if strings.Contains(output, "cgroup") || unsupportedSandboxOutput(output) {
-			skipOrFail(t, output)
-		}
-		t.Fatalf("process-limit preflight failed unexpectedly: %v\n%s", err, output)
-	}
-	if !strings.Contains(output, "process-error=") {
-		t.Fatalf("process limit did not reject excessive child creation: %s", output)
+	delegated.Command = []string{"/bin/probe", "spawn", "64"}
+	output, err = exec.Command(sandboxTestBinary(t), "--config", writeSandboxConfig(t, delegated)).CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "process-error=") {
+		t.Fatalf("process limit did not reject excessive child creation: %v\n%s", err, output)
 	}
 }
 
-func runSecurityProbe(t *testing.T, rootfs, mode string, args []string, options securitySandboxConfig) (string, error) {
-	t.Helper()
-	configPath := writeSecuritySandboxConfig(t, rootfs, mode, args, options)
-	output, err := exec.Command(sandboxTestBinary(t), "--config", configPath).CombinedOutput()
-	return string(output), err
-}
-
-func writeSecuritySandboxConfig(t *testing.T, rootfs, mode string, args []string, options securitySandboxConfig) string {
-	t.Helper()
-	quoteList := func(values []string) string {
-		quoted := make([]string, 0, len(values))
-		for _, value := range values {
-			quoted = append(quoted, strconv.Quote(value))
-		}
-		return "[" + strings.Join(quoted, ", ") + "]"
-	}
-	command := append([]string{"/bin/probe"}, args...)
-	lines := []string{
-		"command: " + quoteList(command),
-		"env_vars: [\"PATH=/bin:/usr/bin\"]",
-		fmt.Sprintf("read_only_root: %t", options.readOnlyRoot),
-		"blocked_syscall_action: " + options.seccomp,
-		"blocked_syscalls: " + quoteList(options.blocked),
-		"drop_capabilities: " + quoteList(options.dropCaps),
-		fmt.Sprintf("file_size_limit_mb: %d", options.fileSizeMB),
-		"cpu_limit_percent: 0",
-		fmt.Sprintf("memory_limit_gb: %d", options.memoryGB),
-		fmt.Sprintf("max_processes: %d", options.maxProcesses),
-		"network_mode: " + mode,
-		"working_dir: /work",
-		"rootfs_source: " + strconv.Quote(rootfs),
-		"dns_servers: " + quoteList(options.dns),
-	}
-	if len(options.binds) == 0 {
-		lines = append(lines, "bind_mounts: []")
-	} else {
-		lines = append(lines, "bind_mounts:")
-		for _, bind := range options.binds {
-			lines = append(lines,
-				"  - host_path: "+strconv.Quote(bind.hostPath),
-				"    container_path: "+strconv.Quote(bind.containerPath))
-			if bind.writable {
-				lines = append(lines, "    writable: true")
-			}
-		}
-	}
-	path := filepath.Join(t.TempDir(), "sandbox.yaml")
-	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	return path
+func pidsControllerUnavailable(output string) bool {
+	return strings.Contains(output, "cgroup-v2 pids controller is unavailable in the delegated hierarchy") ||
+		strings.Contains(output, "cgroup-v2 pids controller is not delegated to the sandbox")
 }

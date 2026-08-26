@@ -42,13 +42,10 @@ func TestSandboxManagedRootFSDefault(t *testing.T) {
 
 	output, err := run()
 	if err != nil {
-		if unsupportedSandboxOutput(string(output)) {
-			skipOrFail(t, string(output))
-		}
 		t.Fatalf("managed-rootfs sandbox failed: %v\n%s", err, output)
 	}
-	if !strings.Contains(string(output), "hello world") {
-		t.Fatalf("managed-rootfs payload output missing: %s", output)
+	if string(output) != "hello world\n" {
+		t.Fatalf("managed-rootfs payload output = %q, want %q", output, "hello world\n")
 	}
 	if _, err := os.Stat(managedRoot); err != nil {
 		t.Fatalf("first launch did not publish the managed rootfs: %v", err)
