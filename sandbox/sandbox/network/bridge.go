@@ -3,6 +3,7 @@
 package network
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -103,34 +104,27 @@ func (m *bridgeManager) setupParentBridge(cfg BridgeConfig) (*BridgeState, error
 	}
 	state.ownedBridge = true
 	if err := m.ops.netlink.VethCreate(hostVeth, nsVeth); err != nil {
-		_ = state.cleanup()
-		return nil, fmt.Errorf("failed to create veth pair: %w", err)
+		return nil, setupFailure(fmt.Errorf("failed to create veth pair: %w", err), state)
 	}
 	state.ownedVeth = true
 	if err := m.ops.netlink.LinkSetMaster(hostVeth, bridge); err != nil {
-		_ = state.cleanup()
-		return nil, fmt.Errorf("failed to attach veth to bridge: %w", err)
+		return nil, setupFailure(fmt.Errorf("failed to attach veth to bridge: %w", err), state)
 	}
 	prefix, _ := netipPrefix(cfg.Subnet)
 	if err := m.ops.netlink.AddrAdd(bridge, cfg.GatewayIP+"/"+strconv.Itoa(prefix)); err != nil {
-		_ = state.cleanup()
-		return nil, fmt.Errorf("failed to assign bridge IP: %w", err)
+		return nil, setupFailure(fmt.Errorf("failed to assign bridge IP: %w", err), state)
 	}
 	if err := m.ops.netlink.LinkSetMTU(bridge, cfg.MTU); err != nil {
-		_ = state.cleanup()
-		return nil, fmt.Errorf("failed to set bridge MTU: %w", err)
+		return nil, setupFailure(fmt.Errorf("failed to set bridge MTU: %w", err), state)
 	}
 	if err := m.ops.netlink.LinkSetMTU(hostVeth, cfg.MTU); err != nil {
-		_ = state.cleanup()
-		return nil, fmt.Errorf("failed to set host veth MTU: %w", err)
+		return nil, setupFailure(fmt.Errorf("failed to set host veth MTU: %w", err), state)
 	}
 	if err := m.ops.netlink.LinkSetUp(bridge); err != nil {
-		_ = state.cleanup()
-		return nil, fmt.Errorf("failed to bring up bridge: %w", err)
+		return nil, setupFailure(fmt.Errorf("failed to bring up bridge: %w", err), state)
 	}
 	if err := m.ops.netlink.LinkSetUp(hostVeth); err != nil {
-		_ = state.cleanup()
-		return nil, fmt.Errorf("failed to bring up host veth: %w", err)
+		return nil, setupFailure(fmt.Errorf("failed to bring up host veth: %w", err), state)
 	}
 	return state, nil
 }
@@ -195,25 +189,25 @@ func (state *BridgeState) cleanup() error {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.cleaned {
-		return nil
-	}
-	var firstErr error
+	var errs []error
 	if state.ownedVeth {
-		if err := state.manager.ops.netlink.VethDelete(state.hostVeth); err != nil && firstErr == nil {
-			firstErr = err
+		if err := state.manager.ops.netlink.VethDelete(state.hostVeth); err != nil {
+			errs = append(errs, fmt.Errorf("delete veth %q: %w", state.hostVeth, err))
+		} else if err == nil {
+			state.ownedVeth = false
 		}
 	}
 	if state.ownedBridge {
-		if err := state.manager.ops.netlink.BridgeDel(state.bridge); err != nil && firstErr == nil {
-			firstErr = err
+		if err := state.manager.ops.netlink.BridgeDel(state.bridge); err != nil {
+			errs = append(errs, fmt.Errorf("delete bridge %q: %w", state.bridge, err))
+		} else {
+			state.ownedBridge = false
 		}
 	}
-	if firstErr == nil {
-		state.cleaned = true
-	}
-	return firstErr
+	return errors.Join(errs...)
 }
+
+func setupFailure(err error, state *BridgeState) error { return errors.Join(err, state.cleanup()) }
 
 func (m *bridgeManager) teardownParentBridge(state *BridgeState) error { return state.cleanup() }
 
@@ -243,11 +237,7 @@ func TeardownParentBridge(state *BridgeState) error {
 	if state == nil {
 		return nil
 	}
-	if err := teardownNATState(state.nat); err != nil {
-		_ = state.manager.teardownParentBridge(state)
-		return err
-	}
-	return state.manager.teardownParentBridge(state)
+	return errors.Join(teardownNATState(state.nat), state.manager.teardownParentBridge(state))
 }
 
 func CheckBridgePrerequisites() error {

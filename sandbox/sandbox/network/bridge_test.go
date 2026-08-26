@@ -62,9 +62,7 @@ func testOperations(mock *mockNetlinkOps) operations {
 }
 
 func TestSetupParentBridgeRollsBackOwnedResources(t *testing.T) {
-	mock := &mockNetlinkOps{fail: "VethCreate vh"}
-	// Names are generated, so exercise the operation order with a failure matcher below.
-	mock.fail = ""
+	mock := &mockNetlinkOps{}
 	state, err := setupParentBridgeWithOps(testBridgeConfig(), testOperations(mock))
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +105,29 @@ func TestGeneratedNamesArePrivateAndUnique(t *testing.T) {
 	}
 }
 
+func TestBridgeCleanupRetriesOnlyFailedDeletes(t *testing.T) {
+	mock := &mockNetlinkOps{}
+	state, err := setupParentBridgeWithOps(testBridgeConfig(), testOperations(mock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.fail = "VethDelete " + state.hostVeth
+	if err := state.cleanup(); err == nil {
+		t.Fatal("cleanup unexpectedly succeeded")
+	}
+	bridgeDeletes := countPrefix(mock.ops, "BridgeDel ")
+	mock.fail = ""
+	if err := state.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if countPrefix(mock.ops, "BridgeDel ") != bridgeDeletes {
+		t.Fatalf("bridge was deleted again: %v", mock.ops)
+	}
+	if state.ownedVeth || state.ownedBridge {
+		t.Fatal("cleanup retained ownership after successful retry")
+	}
+}
+
 func containsOperation(ops []string, want string) bool {
 	for _, op := range ops {
 		if op == want {
@@ -114,6 +135,16 @@ func containsOperation(ops []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func countPrefix(ops []string, prefix string) int {
+	count := 0
+	for _, op := range ops {
+		if strings.HasPrefix(op, prefix) {
+			count++
+		}
+	}
+	return count
 }
 
 var _ netlinkOps = (*mockNetlinkOps)(nil)

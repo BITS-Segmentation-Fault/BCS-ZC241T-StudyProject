@@ -3,6 +3,7 @@
 package network
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 )
@@ -41,18 +42,19 @@ func (m *bridgeManager) setupNAT(cfg BridgeConfig, bridgeName string) (*natState
 	return &natState{config: cfg, manager: m, bridge: bridgeName, label: m.runID}, nil
 }
 
-func SetupNATForBridge(state *BridgeState, cfg BridgeConfig) error {
+func SetupNATForBridge(state *BridgeState) error {
 	if state == nil || state.manager == nil {
 		return fmt.Errorf("cannot configure NAT without an owned bridge state")
 	}
-	if err := cfg.Validate(); err != nil {
-		return fmt.Errorf("bridge config validation failed: %v", err)
+	if state.nat != nil {
+		return fmt.Errorf("firewall state is already installed for this bridge")
 	}
-	natState, err := state.manager.setupNAT(cfg, state.bridge)
+	natState, err := state.manager.setupNAT(state.config, state.bridge)
 	if err != nil {
 		return err
 	}
 	state.nat = natState
+	natState.natOwned = true
 	return nil
 }
 
@@ -62,23 +64,26 @@ func teardownNATState(state *natState) error {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.cleaned {
+	if !state.natOwned && len(state.metadata) == 0 {
 		return nil
 	}
-	var firstErr error
-	if len(state.metadata) == 0 {
-		firstErr = state.manager.ops.firewall.DeleteNAT(state.config.Subnet, state.bridge, state.label)
-	} else {
-		for _, destination := range state.metadata {
-			if err := state.manager.ops.firewall.DeleteMetadataBlock(destination, state.label); err != nil && firstErr == nil {
-				firstErr = err
-			}
+	var errs []error
+	if state.natOwned {
+		if err := state.manager.ops.firewall.DeleteNAT(state.config.Subnet, state.bridge, state.label); err != nil {
+			errs = append(errs, fmt.Errorf("delete NAT rule: %w", err))
+		} else {
+			state.natOwned = false
 		}
 	}
-	if firstErr == nil {
-		state.cleaned = true
+	for i := len(state.metadata) - 1; i >= 0; i-- {
+		destination := state.metadata[i]
+		if err := state.manager.ops.firewall.DeleteMetadataBlock(destination, state.label); err != nil {
+			errs = append(errs, fmt.Errorf("delete metadata rule %q: %w", destination, err))
+		} else {
+			state.metadata = append(state.metadata[:i], state.metadata[i+1:]...)
+		}
 	}
-	return firstErr
+	return errors.Join(errs...)
 }
 
 func SetupNAT(cfg BridgeConfig) error {

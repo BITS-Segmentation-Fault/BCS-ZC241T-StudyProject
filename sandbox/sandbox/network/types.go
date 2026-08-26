@@ -99,7 +99,6 @@ type BridgeState struct {
 	mu          sync.Mutex
 	ownedBridge bool
 	ownedVeth   bool
-	cleaned     bool
 }
 
 type natState struct {
@@ -109,7 +108,7 @@ type natState struct {
 	label    string
 	metadata []string
 	mu       sync.Mutex
-	cleaned  bool
+	natOwned bool
 }
 
 func validateInterfaceName(value string) error {

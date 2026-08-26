@@ -63,7 +63,7 @@ func Parent(cfg config.Config) int {
 			log.Printf("[NETWORK] Bridge setup failed: %v", err)
 			return 1
 		}
-		if err := network.SetupNATForBridge(bridgeState, cfg.BridgeConfig); err != nil {
+		if err := network.SetupNATForBridge(bridgeState); err != nil {
 			cleanupBridge(bridgeState, cfg)
 			log.Printf("[NETWORK] NAT setup failed: %v", err)
 			return 1
@@ -242,5 +242,7 @@ func cleanupBridge(state *network.BridgeState, cfg config.Config) {
 	if state == nil {
 		return
 	}
-	_ = network.TeardownParentBridge(state)
+	if err := network.TeardownParentBridge(state); err != nil {
+		log.Printf("[NETWORK] bridge cleanup failed: %v", err)
+	}
 }
