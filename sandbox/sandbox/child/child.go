@@ -23,12 +23,10 @@ import (
 )
 
 func childLog(msg string) {
-	_, _ = syscall.Write(1, []byte(fmt.Sprintf("[CHILD DEBUG] %s\n", msg)))
+	_, _ = fmt.Fprintln(os.Stderr, msg)
 }
 
 func Child(p2cRFd int) int {
-	childLog("Child process entered execution layer.")
-
 	readPipe := os.NewFile(uintptr(p2cRFd), "sandbox-config")
 	cfg, err := common.ReceiveConfig(readPipe)
 	_ = readPipe.Close()
@@ -46,8 +44,6 @@ func Child(p2cRFd int) int {
 			childLog(fmt.Sprintf("Bridge config failed: %v", err))
 			return 1
 		}
-		childLog("Bridge interface configured.")
-
 	}
 
 	if err := fs.IsolateRootFS(cfg.RootFSSource, cfg.BindMounts, cfg.ReadOnlyRoot, cfg.DNSServers); err != nil {
@@ -55,11 +51,9 @@ func Child(p2cRFd int) int {
 		return 1
 	}
 
-	if cfg.WorkingDir != "" {
-		if err := os.Chdir(cfg.WorkingDir); err != nil {
-			childLog(fmt.Sprintf("JAIL FAILURE: working directory: %v", err))
-			return 1
-		}
+	if err := os.Chdir(cfg.WorkingDir); err != nil {
+		childLog(fmt.Sprintf("JAIL FAILURE: working directory: %v", err))
+		return 1
 	}
 	runtime.LockOSThread()
 
@@ -75,28 +69,18 @@ func Child(p2cRFd int) int {
 		return 1
 	}
 
-	execArgs := append([]string(nil), cfg.Command...)
-	if len(execArgs) == 0 {
-		childLog("EXEC FAILED: no command configured")
-		return 1
-	}
-
-	binaryPath, err := exec.LookPath(execArgs[0])
+	binaryPath, err := exec.LookPath(cfg.Command[0])
 	if err != nil {
 		childLog(fmt.Sprintf("EXEC FAILED: %v", err))
 		return 1
 	}
 
-	childLog(fmt.Sprintf("Handing off to %q", binaryPath))
-	return runInit(binaryPath, execArgs, append([]string(nil), cfg.EnvVars...))
+	return runInit(binaryPath, cfg.Command, cfg.EnvVars)
 }
 
 // runInit keeps the payload in the namespace init process group. The parent
 // therefore reaches both processes with the same group-directed signal.
 func runInit(binary string, command, environment []string) int {
-	if len(command) == 0 {
-		return 127
-	}
 	signals := make(chan os.Signal, 8)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(signals)

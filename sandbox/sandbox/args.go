@@ -12,13 +12,7 @@ import (
 	"sandbox/sandbox/security"
 )
 
-type Args struct {
-	Config  config.Config
-	Verbose bool
-}
-
 type cliValues struct {
-	verbose         *bool
 	configFile      *string
 	networkMode     *string
 	bridgeSubnet    *string
@@ -43,7 +37,6 @@ var cliFlagTakesValue = map[string]bool{
 func registerFlags(fs *flag.FlagSet, defaults config.Config) cliValues {
 	return cliValues{
 		configFile:      fs.String("config", "", "Load configuration from a YAML file"),
-		verbose:         fs.Bool("verbose", false, "Enable diagnostic logging"),
 		networkMode:     fs.String("network-mode", string(defaults.NetworkMode), "Network namespace mode"),
 		bridgeSubnet:    fs.String("bridge-subnet", defaults.BridgeConfig.Subnet, "Bridge subnet CIDR"),
 		bridgeGateway:   fs.String("bridge-gateway", defaults.BridgeConfig.GatewayIP, "Bridge gateway address"),
@@ -83,12 +76,6 @@ func validateFlagTokens(argv []string) (map[string]bool, error) {
 			return nil, fmt.Errorf("option --%s was specified more than once", name)
 		}
 		seen[name] = true
-		if name == "verbose" {
-			if hasValue && value != "true" && value != "false" {
-				return nil, errors.New("invalid boolean value for --verbose")
-			}
-			continue
-		}
 		if !cliFlagTakesValue[name] {
 			continue
 		}
@@ -106,22 +93,22 @@ func validateFlagTokens(argv []string) (map[string]bool, error) {
 	return seen, nil
 }
 
-func ParseArgs(argv []string) (Args, error) {
+func ParseArgs(argv []string) (config.Config, error) {
 	discovered, err := parseCLI(argv, config.DefaultConfig())
 	if err != nil {
-		return Args{}, err
+		return config.Config{}, err
 	}
 	cfg := config.DefaultConfig()
 	if *discovered.values.configFile != "" {
 		loaded, err := config.LoadConfig(*discovered.values.configFile)
 		if err != nil {
-			return Args{}, fmt.Errorf("config: %w", err)
+			return config.Config{}, fmt.Errorf("config: %w", err)
 		}
 		cfg = *loaded
 	}
 	parsed, err := parseCLI(argv, cfg)
 	if err != nil {
-		return Args{}, err
+		return config.Config{}, err
 	}
 	values := parsed.values
 	if parsed.seen["network-mode"] {
@@ -144,17 +131,17 @@ func ParseArgs(argv []string) (Args, error) {
 	}
 	if len(parsed.args) > 0 {
 		if len(cfg.Command) > 0 {
-			return Args{}, errors.New("value_error: command was supplied both by configuration and CLI")
+			return config.Config{}, errors.New("value_error: command was supplied both by configuration and CLI")
 		}
 		cfg.Command = append([]string(nil), parsed.args...)
 	}
 	if err := cfg.Validate(); err != nil {
-		return Args{}, err
+		return config.Config{}, err
 	}
 	if err := security.ValidateSyscallNames(cfg.BlockedSyscalls); err != nil {
-		return Args{}, fmt.Errorf("value_error: %w", err)
+		return config.Config{}, fmt.Errorf("value_error: %w", err)
 	}
-	return Args{Config: cfg, Verbose: *values.verbose}, nil
+	return cfg, nil
 }
 
 func splitCSV(value string) []string {

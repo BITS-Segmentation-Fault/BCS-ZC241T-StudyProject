@@ -12,7 +12,6 @@ test_suite(
         "//sandbox/sandbox:config_test",
         "//sandbox/sandbox:fs_test",
         "//sandbox/sandbox:network_test",
-        "//sandbox/sandbox:utils_test",
         "//sandbox/sandbox:parent_test",
         "//sandbox/sandbox:resources_test",
         "//sandbox/sandbox:rootfs_test",

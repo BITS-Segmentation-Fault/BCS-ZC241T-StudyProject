@@ -24,7 +24,7 @@ func TestSandboxBinaryDiscoversConfigAfterOptions(t *testing.T) {
 	if err := writeMinimalConfig(config); err != nil {
 		t.Fatal(err)
 	}
-	output, err := exec.Command(binary, "--verbose", "--config", config).CombinedOutput()
+	output, err := exec.Command(binary, "--network-mode", "host", "--config", config).CombinedOutput()
 	if err == nil {
 		t.Fatal("sandbox unexpectedly started without a command")
 	}
