@@ -30,10 +30,16 @@ func Parent(cfg config.Config) int {
 		log.Printf("[PRE-FLIGHT ERROR] invalid syscall policy: %v", err)
 		return 1
 	}
-	if err := resources.CheckCPUSupport(cfg.CPULimitPercent); err != nil {
+	cpuLimit, err := resources.PrepareCPULimit(cfg.CPULimitPercent)
+	if err != nil {
 		log.Printf("[PRE-FLIGHT ERROR] CPU limit cannot be provisioned: %v", err)
 		return 1
 	}
+	defer func() {
+		if err := cpuLimit.Cleanup(); err != nil {
+			log.Printf("[RESOURCE] CPU cgroup cleanup failed: %v", err)
+		}
+	}()
 	var bridgeState *network.BridgeState
 	if cfg.NetworkMode == network.Bridge {
 		var err error
@@ -98,8 +104,7 @@ func Parent(cfg config.Config) int {
 		return 1
 	}
 
-	cpuCleanup, err := resources.ApplyCPULimit(cmd.Process.Pid, cfg.CPULimitPercent)
-	if err != nil {
+	if err := cpuLimit.Attach(cmd.Process.Pid); err != nil {
 		terminateChild(cmd)
 		closeFiles(p2cW, c2pR)
 		cleanupBridge(bridgeState, cfg)
@@ -125,7 +130,7 @@ func Parent(cfg config.Config) int {
 		return 1
 	}
 	closeFiles(p2cW, c2pR)
-	return waitForChild(cmd, bridgeState, cfg, cpuCleanup)
+	return waitForChild(cmd, bridgeState, cfg)
 }
 
 func waitForReady(file *os.File) error {
@@ -143,11 +148,8 @@ func waitForReady(file *os.File) error {
 	return nil
 }
 
-func waitForChild(cmd *exec.Cmd, state *network.BridgeState, cfg config.Config, cpuCleanup func()) int {
+func waitForChild(cmd *exec.Cmd, state *network.BridgeState, cfg config.Config) int {
 	defer cleanupBridge(state, cfg)
-	if cpuCleanup != nil {
-		defer cpuCleanup()
-	}
 
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)

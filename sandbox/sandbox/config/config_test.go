@@ -18,7 +18,7 @@ func TestDefaultConfig(t *testing.T) {
 	if c.ReadOnlyRoot != true || c.BlockedSyscallAction != ActionKill || c.NetworkMode != network.None || c.WorkingDir != "/" {
 		t.Fatalf("unexpected security defaults: %+v", c)
 	}
-	if len(c.EnvVars) != 1 || c.EnvVars[0] != "PATH=/bin:/usr/bin" || c.CPULimitPercent != 100 || c.MemoryLimitGB != 1 || c.MaxProcesses != 100 || c.FileSizeLimitMB != 100 {
+	if len(c.EnvVars) != 1 || c.EnvVars[0] != "PATH=/bin:/usr/bin" || c.CPULimitPercent != 0 || c.MemoryLimitGB != 1 || c.MaxProcesses != 100 || c.FileSizeLimitMB != 100 {
 		t.Fatalf("unexpected resource/environment defaults: %+v", c)
 	}
 	if c.RootFSSource != "/var/lib/sandbox/rootfs" || len(c.DropCapabilities) != 1 || c.DropCapabilities[0] != "ALL" {

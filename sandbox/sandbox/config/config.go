@@ -84,7 +84,7 @@ func DefaultConfig() Config {
 		BlockedSyscalls:      []string{"mount", "reboot", "ptrace", "swapon", "syslog"},
 		DropCapabilities:     []string{"ALL"},
 		FileSizeLimitMB:      100,
-		CPULimitPercent:      100,
+		CPULimitPercent:      0,
 		MemoryLimitGB:        1,
 		MaxProcesses:         100,
 		NetworkMode:          network.None,

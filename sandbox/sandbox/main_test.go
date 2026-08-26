@@ -15,7 +15,7 @@ func TestParseArgs(t *testing.T) {
 	if strings.Join(got.Config.Command, "\x00") != "/bin/echo\x00" || string(got.Config.NetworkMode) != "host" {
 		t.Fatalf("unexpected args: %+v", got.Config)
 	}
-	if got.Config.CPULimitPercent != 100 {
+	if got.Config.CPULimitPercent != 0 {
 		t.Fatalf("CPU default = %d", got.Config.CPULimitPercent)
 	}
 }
