@@ -60,6 +60,13 @@ go_library(
 )
 
 go_library(
+    name = "rootfs",
+    srcs = glob(["rootfs/*.go"], exclude = ["rootfs/*_test.go"]),
+    importpath = "sandbox/sandbox/rootfs",
+    deps = ["@org_golang_x_sys//unix:go_default_library"],
+)
+
+go_library(
     name = "security",
     srcs = glob(["security/*.go"], exclude = ["security/*_test.go"]),
     importpath = "sandbox/sandbox/security",
@@ -218,6 +225,13 @@ go_test(
     srcs = glob(["resources/*.go"]),
     importpath = "sandbox/sandbox/resources",
     deps = [":config"],
+)
+
+go_test(
+    name = "rootfs_test",
+    srcs = glob(["rootfs/*.go"]),
+    importpath = "sandbox/sandbox/rootfs",
+    deps = ["@org_golang_x_sys//unix:go_default_library"],
 )
 
 go_test(
