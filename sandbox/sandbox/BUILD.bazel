@@ -93,7 +93,6 @@ go_binary(
     srcs = ["main.go", "args.go"],
     deps = [
         ":child",
-        ":ipc",
         ":config",
         ":network",
         ":parent",
@@ -115,7 +114,6 @@ go_test(
     importpath = "sandbox/sandbox",
     deps = [
         ":child",
-        ":ipc",
         ":config",
         ":network",
         ":parent",
@@ -198,30 +196,21 @@ go_test(
 go_test(
     name = "sandbox_integration_test",
     srcs = [
-        "main.go",
-        "args.go",
         "sandbox_integration_test.go",
         "sandbox_test_helpers_test.go",
     ],
     data = [":sandbox", ":testprobe"],
     importpath = "sandbox/sandbox",
     deps = [
-        ":child",
-        ":ipc",
         ":config",
         "@in_gopkg_yaml_v3//:go_default_library",
         ":network",
-        ":parent",
-        ":security",
-        "@org_golang_x_sys//unix:go_default_library",
     ],
 )
 
 go_test(
     name = "sandbox_e2e_test",
     srcs = [
-        "main.go",
-        "args.go",
         "sandbox_e2e_test.go",
         "sandbox_managed_rootfs_e2e_test.go",
         "sandbox_security_e2e_test.go",
@@ -230,36 +219,23 @@ go_test(
     data = [":sandbox", ":testprobe"],
     importpath = "sandbox/sandbox",
     deps = [
-        ":child",
-        ":ipc",
         ":config",
         "@in_gopkg_yaml_v3//:go_default_library",
         ":network",
-        ":parent",
-        ":security",
-        "@org_golang_x_sys//unix:go_default_library",
     ],
 )
 
 go_test(
     name = "sandbox_privileged_e2e_test",
     srcs = [
-        "main.go",
-        "args.go",
         "sandbox_bridge_e2e_test.go",
-        "sandbox_e2e_test.go",
         "sandbox_test_helpers_test.go",
     ],
     data = [":sandbox", ":testprobe"],
     importpath = "sandbox/sandbox",
     deps = [
-        ":child",
-        ":ipc",
         ":config",
         "@in_gopkg_yaml_v3//:go_default_library",
         ":network",
-        ":parent",
-        ":security",
-        "@org_golang_x_sys//unix:go_default_library",
     ],
 )
