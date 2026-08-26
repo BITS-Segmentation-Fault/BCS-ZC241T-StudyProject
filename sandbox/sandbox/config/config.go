@@ -166,6 +166,12 @@ func (c Config) Validate() error {
 			return errors.New("value_error: bind_mount container_path cannot be root")
 		}
 	}
+	if c.RootFSSource == "" && !c.ReadOnlyRoot {
+		return errors.New("value_error: managed rootfs requires read_only_root=true")
+	}
+	if err := validateBindPolicies(c.BindMounts, len(c.DNSServers) > 0); err != nil {
+		return err
+	}
 	for _, dns := range c.DNSServers {
 		if strings.TrimSpace(dns) == "" || net.ParseIP(dns) == nil {
 			return fmt.Errorf("value_error: dns_servers contains invalid address %q", dns)
@@ -175,6 +181,37 @@ func (c Config) Validate() error {
 		return err
 	}
 	return validateEnvironment(c.EnvWhitelist, "env_whitelist", false)
+}
+
+func validateBindPolicies(mounts []BindMount, dnsConfigured bool) error {
+	cleaned := make([]string, len(mounts))
+	for i, mount := range mounts {
+		cleaned[i] = filepath.Clean(mount.ContainerPath)
+		if cleaned[i] == "/proc" || strings.HasPrefix(cleaned[i], "/proc/") {
+			return fmt.Errorf("value_error: bind_mount target %q is reserved for proc", mount.ContainerPath)
+		}
+		if dnsConfigured && cleaned[i] == "/etc/resolv.conf" {
+			return errors.New("value_error: bind_mount target /etc/resolv.conf conflicts with dns_servers")
+		}
+	}
+	for i := range cleaned {
+		for j := 0; j < i; j++ {
+			if cleaned[i] == cleaned[j] {
+				return fmt.Errorf("value_error: duplicate bind_mount target %q", mounts[i].ContainerPath)
+			}
+			if isPathAncestor(cleaned[i], cleaned[j]) || isPathAncestor(cleaned[j], cleaned[i]) {
+				return fmt.Errorf("value_error: overlapping bind_mount targets %q and %q", mounts[j].ContainerPath, mounts[i].ContainerPath)
+			}
+		}
+	}
+	return nil
+}
+
+func isPathAncestor(parent, child string) bool {
+	if parent == "/" || parent == child {
+		return false
+	}
+	return strings.HasPrefix(child, parent+string(filepath.Separator))
 }
 
 func validateAbsolutePath(name, value string, required bool) error {
