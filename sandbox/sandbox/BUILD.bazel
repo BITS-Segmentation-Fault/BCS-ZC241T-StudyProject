@@ -77,6 +77,21 @@ go_library(
     ],
 )
 
+go_test(
+    name = "child_test",
+    srcs = glob(["child/*.go"]),
+    importpath = "sandbox/sandbox/child",
+    deps = [
+        ":ipc",
+        ":config",
+        ":fs",
+        ":network",
+        ":resources",
+        ":security",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
+)
+
 go_library(
     name = "parent",
     srcs = glob(["parent/*.go"], exclude = ["parent/*_test.go"]),

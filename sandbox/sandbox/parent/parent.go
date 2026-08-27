@@ -188,7 +188,7 @@ func forwardSignals(cmd *exec.Cmd, signals <-chan os.Signal, done <-chan struct{
 		case received := <-signals:
 			sig, ok := received.(syscall.Signal)
 			if ok && cmd.Process != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, sig)
+				_ = syscall.Kill(cmd.Process.Pid, sig)
 			}
 		}
 	}
@@ -196,7 +196,7 @@ func forwardSignals(cmd *exec.Cmd, signals <-chan os.Signal, done <-chan struct{
 
 func terminateChild(cmd *exec.Cmd) {
 	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = syscall.Kill(cmd.Process.Pid, syscall.SIGKILL)
 	}
 	_ = cmd.Wait()
 }

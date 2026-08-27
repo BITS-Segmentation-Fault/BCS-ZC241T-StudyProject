@@ -78,8 +78,6 @@ func Child(p2cRFd int) int {
 	return runInit(binaryPath, cfg.Command, cfg.EnvVars)
 }
 
-// runInit keeps the payload in the namespace init process group. The parent
-// therefore reaches both processes with the same group-directed signal.
 func runInit(binary string, command, environment []string) int {
 	signals := make(chan os.Signal, 8)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
@@ -92,8 +90,15 @@ func runInit(binary string, command, environment []string) int {
 		childLog(fmt.Sprintf("EXEC FAILED: %v", err))
 		return 127
 	}
-	deliverQueuedSignals(signals, payload.Process.Pid)
+	done := make(chan struct{})
+	forwarded := make(chan struct{})
+	go func() {
+		defer close(forwarded)
+		forwardPayloadSignals(signals, payload.Process.Pid, done)
+	}()
 	status, err := reapUntilPayloadExits(payload.Process.Pid)
+	close(done)
+	<-forwarded
 	_ = payload.Process.Release()
 	if err != nil {
 		childLog(fmt.Sprintf("INIT wait failed: %v", err))
@@ -108,15 +113,15 @@ func runInit(binary string, command, environment []string) int {
 	return 1
 }
 
-func deliverQueuedSignals(signals <-chan os.Signal, payloadPID int) {
+func forwardPayloadSignals(signals <-chan os.Signal, payloadPID int, done <-chan struct{}) {
 	for {
 		select {
+		case <-done:
+			return
 		case received := <-signals:
 			if sig, ok := received.(syscall.Signal); ok {
 				_ = syscall.Kill(payloadPID, sig)
 			}
-		default:
-			return
 		}
 	}
 }

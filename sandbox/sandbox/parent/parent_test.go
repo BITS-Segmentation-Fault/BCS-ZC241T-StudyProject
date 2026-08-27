@@ -83,7 +83,7 @@ func TestProgressRendererSilenceAndTTYOutput(t *testing.T) {
 	}
 }
 
-func TestWaitForChild_ForwardsSignalsToProcessGroup(t *testing.T) {
+func TestWaitForChild_ForwardsSignalsToNamespaceInit(t *testing.T) {
 	cmd := exec.Command("/bin/sleep", "30")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {

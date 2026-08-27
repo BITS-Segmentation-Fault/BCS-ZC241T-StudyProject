@@ -8,6 +8,7 @@ alias(
 test_suite(
     name = "sandbox_tests",
     tests = [
+        "//sandbox/sandbox:child_test",
         "//sandbox/sandbox:sandbox_test",
         "//sandbox/sandbox:config_test",
         "//sandbox/sandbox:ipc_test",
