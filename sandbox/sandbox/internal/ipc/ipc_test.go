@@ -23,6 +23,7 @@ func TestConfigSnapshotRoundTrip(t *testing.T) {
 		ArchiveSHA256: strings.Repeat("a", 64),
 	}
 	cfg.FileSizeLimitMB = 4
+	cfg.Interactive = true
 	done := make(chan error, 1)
 	go func() { done <- WriteConfig(right, cfg); _ = right.Close() }()
 	got, err := ReadConfig(left)

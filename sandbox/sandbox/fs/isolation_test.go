@@ -254,3 +254,19 @@ func TestOverlayStageCleanupDoesNotReuseClosedDescriptor(t *testing.T) {
 		t.Fatalf("cleanup closed an unrelated descriptor: %v", err)
 	}
 }
+
+func TestTrustedDeviceSourcesConditionallyIncludeTTY(t *testing.T) {
+	nonInteractive := trustedDeviceSources(false)
+	interactive := trustedDeviceSources(true)
+	if len(interactive) != len(nonInteractive)+1 {
+		t.Fatalf("interactive source count = %d, noninteractive = %d", len(interactive), len(nonInteractive))
+	}
+	for _, device := range nonInteractive {
+		if device.name == "tty" {
+			t.Fatal("noninteractive device sources include tty")
+		}
+	}
+	if got := interactive[len(interactive)-1]; got.name != "tty" || got.path != "/dev/tty" || got.major != 5 || got.minor != 0 {
+		t.Fatalf("interactive tty source = %+v", got)
+	}
+}
