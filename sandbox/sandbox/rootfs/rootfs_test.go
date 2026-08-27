@@ -610,53 +610,87 @@ func TestHTTPSRedirectIsRequired(t *testing.T) {
 	}
 }
 
-func TestHTTPSRedirectAllowsSameHostAndRejectsHostChanges(t *testing.T) {
+func TestHTTPSRedirectAllowsSameAndCrossHost(t *testing.T) {
 	body := minimalArchive(t)
 	p := testProvisioner(t, body, http.StatusOK, nil)
 	var requests atomic.Int32
+	redirectedURL := "https://assets.example.invalid/rootfs.tar.gz?sig=signed-token"
 	p.Client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		requests.Add(1)
 		if request.URL.String() == testReleaseURL {
 			response := testResponse(http.StatusFound, nil)
-			response.Header.Set("Location", testReleaseURL+".final")
+			response.Header.Set("Location", redirectedURL)
 			return response, nil
+		}
+		if request.URL.String() != redirectedURL {
+			return nil, fmt.Errorf("unexpected redirect request %s", request.URL)
 		}
 		return testResponse(http.StatusOK, body), nil
 	})
 	if _, err := p.Resolve(""); err != nil {
-		t.Fatalf("same-host HTTPS redirect failed: %v", err)
+		t.Fatalf("cross-host HTTPS redirect failed: %v", err)
 	}
 	if requests.Load() != 2 {
-		t.Fatalf("same-host redirect requests = %d, want 2", requests.Load())
-	}
-
-	p = testProvisioner(t, body, http.StatusOK, nil)
-	p.Client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		response := testResponse(http.StatusFound, nil)
-		response.Header.Set("Location", "https://other.example.invalid/rootfs.tar.gz")
-		return response, nil
-	})}
-	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "different host") {
-		t.Fatalf("different-host HTTPS redirect error = %v", err)
+		t.Fatalf("cross-host redirect requests = %d, want 2", requests.Load())
 	}
 }
 
-func TestDefaultHTTPClientRedirectPolicy(t *testing.T) {
+func TestCrossHostRedirectDigestMismatchDoesNotPublish(t *testing.T) {
+	body := minimalArchive(t)
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	var requests atomic.Int32
+	redirectedURL := "https://assets.example.invalid/rootfs.tar.gz?sig=signed-token"
+	p.Client.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		requests.Add(1)
+		if request.URL.String() == testReleaseURL {
+			response := testResponse(http.StatusFound, nil)
+			response.Header.Set("Location", redirectedURL)
+			return response, nil
+		}
+		return testResponse(http.StatusOK, []byte("wrong archive")), nil
+	})
+	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "archive SHA-256 mismatch") {
+		t.Fatalf("digest-mismatched redirect error = %v", err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("digest-mismatched redirect requests = %d, want 2", requests.Load())
+	}
+	if _, err := os.Stat(testCachePath(t, p)); !os.IsNotExist(err) {
+		t.Fatalf("digest-mismatched redirect published cache: %v", err)
+	}
+}
+
+func TestFailedRedirectErrorDoesNotExposeQuery(t *testing.T) {
+	p := testProvisioner(t, minimalArchive(t), http.StatusOK, nil)
+	p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		response := testResponse(http.StatusFound, nil)
+		response.Header.Set("Location", "http://assets.example.invalid/rootfs.tar.gz?sig=secret-token")
+		return response, nil
+	})
+	_, err := p.Resolve("")
+	if err == nil || strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("redirect error = %v, want a sanitized failure", err)
+	}
+}
+
+func TestHTTPSRedirectPolicy(t *testing.T) {
 	origin, err := url.Parse(testReleaseURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	client := defaultHTTPClientFor(origin)
 	tests := []struct {
-		name    string
-		target  string
-		prior   int
-		wantErr bool
+		name       string
+		target     string
+		prior      int
+		wantErr    bool
+		wantSecret bool
 	}{
-		{name: "same origin", target: testReleaseURL, wantErr: false},
-		{name: "different host", target: "https://other.example/rootfs.tar.gz", wantErr: true},
-		{name: "different scheme", target: "http://dl-cdn.alpinelinux.org/rootfs.tar.gz", wantErr: true},
-		{name: "userinfo", target: "https://user@dl-cdn.alpinelinux.org/rootfs.tar.gz", wantErr: true},
+		{name: "same origin", target: testReleaseURL + "?sig=signed-token"},
+		{name: "cross-host signed query", target: "https://other.example/rootfs.tar.gz?sig=signed-token"},
+		{name: "different scheme", target: "http://other.example/rootfs.tar.gz?sig=secret-token", wantErr: true},
+		{name: "userinfo", target: "https://user@other.example/rootfs.tar.gz", wantErr: true},
+		{name: "missing host", target: "https:///rootfs.tar.gz", wantErr: true},
 		{name: "too many hops", target: testReleaseURL, prior: 3, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -669,6 +703,9 @@ func TestDefaultHTTPClientRedirectPolicy(t *testing.T) {
 			err = client.CheckRedirect(&http.Request{URL: target}, previous)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("CheckRedirect() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantSecret && err != nil && strings.Contains(err.Error(), "secret-token") {
+				t.Fatalf("CheckRedirect() exposed query secret: %v", err)
 			}
 		})
 	}

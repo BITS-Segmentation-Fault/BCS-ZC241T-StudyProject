@@ -319,7 +319,7 @@ func (p Provisioner) download(ctx context.Context, release managedRelease, desti
 	}
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("download request failed: %v", err)
+		return safeDownloadError(request.URL, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -388,16 +388,56 @@ func validateReleaseURL(raw string) (*url.URL, error) {
 	return parsed, nil
 }
 
+func safeURLString(raw *url.URL) string {
+	if raw == nil {
+		return "<unknown URL>"
+	}
+	safe := *raw
+	safe.User = nil
+	safe.RawQuery = ""
+	safe.ForceQuery = false
+	safe.Fragment = ""
+	return safe.String()
+}
+
+type redirectError struct {
+	message string
+}
+
+func (e *redirectError) Error() string { return e.message }
+
+func safeDownloadError(requestURL *url.URL, err error) error {
+	var redirectErr *redirectError
+	if errors.As(err, &redirectErr) {
+		return fmt.Errorf("download request failed for %s: %s", safeURLString(requestURL), redirectErr)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("download request failed for %s: request timed out", safeURLString(requestURL))
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		err = urlErr.Err
+	}
+	message := err.Error()
+	if strings.Contains(message, "://") || strings.ContainsAny(message, "?#") {
+		message = "transport error"
+	}
+	return fmt.Errorf("download request failed for %s: %s", safeURLString(requestURL), message)
+}
+
 func redirectPolicy(origin *url.URL) func(*http.Request, []*http.Request) error {
 	return func(request *http.Request, previous []*http.Request) error {
 		if len(previous) >= 3 {
-			return fmt.Errorf("refusing redirect after %d hops", len(previous))
+			return &redirectError{message: fmt.Sprintf("refusing redirect after %d hops", len(previous))}
 		}
-		if request.URL.Scheme != "https" || request.URL.User != nil {
-			return fmt.Errorf("refusing redirect to a non-HTTPS or userinfo URL %s", request.URL)
+		if request.URL == nil || request.URL.Hostname() == "" {
+			return &redirectError{message: "refusing redirect with a missing host"}
 		}
-		if origin != nil && (!strings.EqualFold(request.URL.Hostname(), origin.Hostname()) || request.URL.Port() != origin.Port()) {
-			return fmt.Errorf("refusing redirect to a different host %q", request.URL.Host)
+		if request.URL.Scheme != "https" || (origin != nil && request.URL.Scheme != origin.Scheme) {
+			return &redirectError{message: fmt.Sprintf("refusing redirect to a non-HTTPS URL %s", safeURLString(request.URL))}
+		}
+		if request.URL.User != nil {
+			return &redirectError{message: fmt.Sprintf("refusing redirect with userinfo in %s", safeURLString(request.URL))}
 		}
 		return nil
 	}
