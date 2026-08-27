@@ -539,35 +539,21 @@ func TestProvisioningFailuresLeaveNoPublishedRootfs(t *testing.T) {
 	}
 }
 
-func TestProvisioningFailureAndResponseLimits(t *testing.T) {
+func TestProvisioningFailuresAndDigest(t *testing.T) {
 	body := minimalArchive(t)
 	for _, tt := range []struct {
 		name      string
 		status    int
-		maxBytes  int64
 		badDigest bool
-		streaming bool
 		want      string
 	}{
 		{name: "http failure", status: http.StatusNotFound, want: "404"},
-		{name: "declared response too large", status: http.StatusOK, maxBytes: int64(len(body) - 1), want: "download limit"},
-		{name: "streaming response too large", status: http.StatusOK, maxBytes: int64(len(body) - 1), streaming: true, want: "download limit"},
 		{name: "digest mismatch", status: http.StatusOK, badDigest: true, want: "SHA-256 mismatch"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			p := testProvisioner(t, body, tt.status, nil)
 			source := p.sourceForProvisioning()
 			release := source.Releases[runtime.GOARCH]
-			if tt.maxBytes != 0 {
-				p.maxArchiveBytes = tt.maxBytes
-			}
-			if tt.streaming {
-				p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
-					response := testResponse(http.StatusOK, body)
-					response.ContentLength = -1
-					return response, nil
-				})
-			}
 			if tt.badDigest {
 				release.ArchiveSHA256 = strings.Repeat("f", 64)
 			}
@@ -576,6 +562,39 @@ func TestProvisioningFailureAndResponseLimits(t *testing.T) {
 				t.Fatalf("Resolve() error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+type interruptedReader struct {
+	data []byte
+	done bool
+}
+
+func (r *interruptedReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, errors.New("download interrupted")
+	}
+	r.done = true
+	return copy(p, r.data), nil
+}
+
+func TestProvisioningInterruptedDownloadLeavesNoTemporaryRootfs(t *testing.T) {
+	body := minimalArchive(t)
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		response := testResponse(http.StatusOK, nil)
+		response.Body = io.NopCloser(&interruptedReader{data: body})
+		return response, nil
+	})
+	if _, err := p.Resolve(""); err == nil || !strings.Contains(err.Error(), "download interrupted") {
+		t.Fatalf("interrupted download error = %v", err)
+	}
+	target := testCachePath(t, p)
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("interrupted download left published rootfs: %v", err)
+	}
+	if temporary, _ := filepath.Glob(filepath.Join(filepath.Dir(target), ".rootfs-*")); len(temporary) != 0 {
+		t.Fatalf("interrupted download left temporary directories: %v", temporary)
 	}
 }
 

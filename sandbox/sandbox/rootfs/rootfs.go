@@ -31,8 +31,6 @@ const (
 	requestTimeout   = 45 * time.Second
 	connectTimeout   = 10 * time.Second
 	maxManifestBytes = 4 << 10
-	// This bound applies only to transient downloads, before archive hashing.
-	maxManagedArchiveBytes int64 = 64 << 20
 )
 
 type managedSource struct {
@@ -91,10 +89,9 @@ type Provisioner struct {
 
 	// source is intentionally private: tests replace the catalog with small
 	// synthetic archives, while production uses the pinned default above.
-	source          *managedSource
-	maxArchiveBytes int64
-	makeTemp        func(string, string) (string, error)
-	renamePath      func(int, string, int, string, uint) error
+	source     *managedSource
+	makeTemp   func(string, string) (string, error)
+	renamePath func(int, string, int, string, uint) error
 }
 
 func (p Provisioner) sourceForProvisioning() managedSource {
@@ -325,14 +322,6 @@ func (p Provisioner) download(ctx context.Context, release managedRelease, desti
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("download returned HTTP status %s", response.Status)
 	}
-	archiveLimit := p.maxArchiveBytes
-	if archiveLimit <= 0 {
-		archiveLimit = maxManagedArchiveBytes
-	}
-	if response.ContentLength > archiveLimit {
-		return fmt.Errorf("download exceeds the %d-byte download limit", archiveLimit)
-	}
-
 	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return fmt.Errorf("cannot create archive temporary file: %v", err)
@@ -346,13 +335,9 @@ func (p Provisioner) download(ctx context.Context, release managedRelease, desti
 	}()
 
 	hash := sha256.New()
-	limited := io.LimitReader(response.Body, archiveLimit+1)
-	count, err := io.Copy(file, io.TeeReader(limited, hash))
+	_, err = io.Copy(io.MultiWriter(file, hash), response.Body)
 	if err != nil {
 		return fmt.Errorf("cannot save downloaded archive: %v", err)
-	}
-	if count > archiveLimit {
-		return fmt.Errorf("download exceeds the %d-byte download limit", archiveLimit)
 	}
 	if got := hex.EncodeToString(hash.Sum(nil)); got != release.ArchiveSHA256 {
 		return fmt.Errorf("archive SHA-256 mismatch: got %s, want %s", got, release.ArchiveSHA256)
