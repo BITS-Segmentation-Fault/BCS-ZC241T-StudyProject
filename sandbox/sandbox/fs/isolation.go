@@ -6,6 +6,7 @@
 package fs
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,7 +24,7 @@ const emptyPathMountFlags = unix.MOVE_MOUNT_F_EMPTY_PATH
 // IsolateRootFS creates and enters the isolated root. It intentionally uses
 // only the new mount API after the initial openat2 lookups: older kernels are
 // rejected instead of receiving a race-prone path-based fallback.
-func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoot bool, dnsServers []string) error {
+func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoot bool, dnsServers []string) (retErr error) {
 	if err := validateIsolationPath("rootfs", rootfsPath); err != nil {
 		return err
 	}
@@ -68,28 +69,88 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 		holds = append(holds, heldBind{mount: bind, source: source, target: -1, isDir: isDir})
 	}
 
+	needsOverlay := !readOnlyRoot
+	if readOnlyRoot {
+		for _, bind := range holds {
+			target, targetErr := openTarget(rootFD, bind.mount.ContainerPath)
+			if targetErr != nil {
+				if errors.Is(targetErr, unix.ENOENT) {
+					needsOverlay = true
+					continue
+				}
+				return fmt.Errorf("pre-flight error: cannot open bind target %q: %w", bind.mount.ContainerPath, targetErr)
+			}
+			if err := requireSameType(bind.source, target, bind.mount.HostPath, bind.mount.ContainerPath); err != nil {
+				_ = unix.Close(target)
+				return err
+			}
+			_ = unix.Close(target)
+		}
+		if target, targetErr := openTarget(rootFD, "/proc"); targetErr != nil {
+			if errors.Is(targetErr, unix.ENOENT) {
+				needsOverlay = true
+			} else {
+				return fmt.Errorf("pre-flight error: cannot open proc target: %w", targetErr)
+			}
+		} else {
+			if err := requireDirectory(target, "/proc"); err != nil {
+				_ = unix.Close(target)
+				return err
+			}
+			_ = unix.Close(target)
+		}
+		if len(dnsServers) > 0 {
+			if target, targetErr := openTarget(rootFD, "/etc/resolv.conf"); targetErr != nil {
+				if errors.Is(targetErr, unix.ENOENT) {
+					needsOverlay = true
+				} else {
+					return fmt.Errorf("pre-flight error: cannot open DNS target: %w", targetErr)
+				}
+			} else {
+				if err := requireRegularFile(target, "/etc/resolv.conf"); err != nil {
+					_ = unix.Close(target)
+					return err
+				}
+				_ = unix.Close(target)
+			}
+		}
+	}
+
 	if err := unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""); err != nil {
 		return fmt.Errorf("failed to make root mount space private: %w", err)
 	}
 
-	rootMount, err := cloneMount(rootFD, true)
-	if err != nil {
-		return fmt.Errorf("clone rootfs mount: %w", err)
+	var stage *overlayStage
+	var rootMount int
+	if needsOverlay {
+		rootMount, stage, err = createOverlayRoot(rootFD)
+		if err != nil {
+			return fmt.Errorf("create private writable root: %w", err)
+		}
+		defer func() {
+			if stage != nil {
+				if err := stage.cleanup(); err != nil {
+					retErr = errors.Join(retErr, fmt.Errorf("clean private root staging: %w", err))
+				}
+			}
+		}()
+	} else {
+		rootMount, err = cloneMount(rootFD, true)
+		if err != nil {
+			return fmt.Errorf("clone rootfs mount: %w", err)
+		}
 	}
 	defer unix.Close(rootMount)
 	rootAttrs := unix.MountAttr{Attr_set: unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV}
-	if readOnlyRoot {
-		rootAttrs.Attr_set |= unix.MOUNT_ATTR_RDONLY
-	}
-	if err := setRecursiveMountAttrs(rootMount, rootAttrs); err != nil {
-		return fmt.Errorf("configure rootfs mount: %w", err)
-	}
 	if err := moveMount(rootMount, rootFD); err != nil {
 		return fmt.Errorf("attach rootfs mount: %w", err)
 	}
 
 	for i := range holds {
 		target, targetErr := openTarget(rootMount, holds[i].mount.ContainerPath)
+		if targetErr != nil && stage != nil && errors.Is(targetErr, unix.ENOENT) {
+			target, targetErr = openOrCreateTarget(rootMount, holds[i].mount.ContainerPath, holds[i].isDir)
+		}
 		if targetErr != nil {
 			return fmt.Errorf("pre-flight error: cannot open bind target %q: %w", holds[i].mount.ContainerPath, targetErr)
 		}
@@ -99,6 +160,9 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 		}
 	}
 	procTarget, err := openTarget(rootMount, "/proc")
+	if err != nil && stage != nil && errors.Is(err, unix.ENOENT) {
+		procTarget, err = openOrCreateTarget(rootMount, "/proc", true)
+	}
 	if err != nil {
 		return fmt.Errorf("pre-flight error: cannot open proc target: %w", err)
 	}
@@ -110,6 +174,9 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 	var dnsTarget int
 	if len(dnsServers) > 0 {
 		dnsTarget, err = openTarget(rootMount, "/etc/resolv.conf")
+		if err != nil && stage != nil && errors.Is(err, unix.ENOENT) {
+			dnsTarget, err = openOrCreateTarget(rootMount, "/etc/resolv.conf", false)
+		}
 		if err != nil {
 			return fmt.Errorf("pre-flight error: cannot open DNS target: %w", err)
 		}
@@ -117,6 +184,12 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 		if err := requireRegularFile(dnsTarget, "/etc/resolv.conf"); err != nil {
 			return err
 		}
+	}
+	if readOnlyRoot {
+		rootAttrs.Attr_set |= unix.MOUNT_ATTR_RDONLY
+	}
+	if err := setRecursiveMountAttrs(rootMount, rootAttrs); err != nil {
+		return fmt.Errorf("seal rootfs mount: %w", err)
 	}
 
 	for _, held := range holds {
@@ -150,6 +223,12 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 		if err := attachMount(rootMount, dnsTarget, dnsMount, "/etc/resolv.conf", dnsSource, 0); err != nil {
 			return fmt.Errorf("attach DNS mount: %w", err)
 		}
+	}
+	if stage != nil {
+		if err := stage.cleanup(); err != nil {
+			return fmt.Errorf("clean private root staging: %w", err)
+		}
+		stage = nil
 	}
 
 	if err := unix.Fchdir(rootMount); err != nil {
@@ -208,6 +287,249 @@ func openTarget(rootFD int, path string) (int, error) {
 		return -1, err
 	}
 	return fd, nil
+}
+
+// openOrCreateTarget creates only in a private overlay mount. Every component
+// is opened relative to the descriptor for that mount, so a lower-root
+// symlink or a replacement pathname cannot redirect target creation.
+func openOrCreateTarget(rootFD int, path string, directory bool) (int, error) {
+	if err := validateIsolationPath("target", path); err != nil {
+		return -1, err
+	}
+	clean := filepath.Clean(path)
+	if clean == "/" {
+		return -1, fmt.Errorf("target path %q is not a safe root-relative path", path)
+	}
+	parts := strings.Split(strings.TrimPrefix(clean, "/"), "/")
+	current := rootFD
+	closeCurrent := false
+	defer func() {
+		if closeCurrent {
+			_ = unix.Close(current)
+		}
+	}()
+	for index, part := range parts {
+		fd, err := openSecureBeneath(current, part)
+		if err != nil && errors.Is(err, unix.ENOENT) {
+			if index == len(parts)-1 && !directory {
+				created, createErr := unix.Openat(current, part, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
+				if createErr != nil && !errors.Is(createErr, unix.EEXIST) {
+					return -1, createErr
+				}
+				if createErr == nil {
+					if closeErr := unix.Close(created); closeErr != nil {
+						return -1, closeErr
+					}
+				}
+			} else {
+				if createErr := unix.Mkdirat(current, part, 0755); createErr != nil && !errors.Is(createErr, unix.EEXIST) {
+					return -1, createErr
+				}
+			}
+			fd, err = openSecureBeneath(current, part)
+		}
+		if err != nil {
+			return -1, err
+		}
+		if closeCurrent {
+			if closeErr := unix.Close(current); closeErr != nil {
+				_ = unix.Close(fd)
+				return -1, closeErr
+			}
+		}
+		current = fd
+		closeCurrent = true
+	}
+	if directory {
+		if err := requireDirectory(current, path); err != nil {
+			return -1, err
+		}
+	} else if err := requireRegularFile(current, path); err != nil {
+		return -1, err
+	}
+	result := current
+	closeCurrent = false
+	return result, nil
+}
+
+func openSecureBeneath(dirfd int, path string) (int, error) {
+	how := &unix.OpenHow{Flags: unix.O_PATH | unix.O_CLOEXEC, Resolve: beneathResolve}
+	return unix.Openat2(dirfd, path, how)
+}
+
+type overlayStage struct {
+	path         string
+	attached     bool
+	stageFD      int
+	upperFD      int
+	workFD       int
+	lowerFD      int
+	stagingMount int
+}
+
+func (s *overlayStage) cleanup() error {
+	if s == nil {
+		return nil
+	}
+	var cleanupErr error
+	if s.attached {
+		if err := unix.Unmount(s.path, unix.MNT_DETACH); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		} else {
+			s.attached = false
+		}
+	}
+	for _, descriptor := range []struct {
+		name string
+		fd   *int
+	}{
+		{name: "upper directory", fd: &s.upperFD},
+		{name: "work directory", fd: &s.workFD},
+		{name: "lower directory", fd: &s.lowerFD},
+		{name: "staging directory", fd: &s.stageFD},
+		{name: "staging mount", fd: &s.stagingMount},
+	} {
+		if err := closeOwnedFD(descriptor.fd, descriptor.name); err != nil {
+			cleanupErr = errors.Join(cleanupErr, err)
+		}
+	}
+	if !s.attached && s.path != "" {
+		if err := os.Remove(s.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupErr = errors.Join(cleanupErr, err)
+		} else {
+			s.path = ""
+		}
+	}
+	return cleanupErr
+}
+
+func closeOwnedFD(fd *int, name string) error {
+	if *fd < 0 {
+		return nil
+	}
+	value := *fd
+	*fd = -1
+	if err := unix.Close(value); err != nil {
+		return fmt.Errorf("close %s: %w", name, err)
+	}
+	return nil
+}
+
+func createOverlayRoot(lowerFD int) (int, *overlayStage, error) {
+	stagePath, err := os.MkdirTemp("", "sandbox-overlay-")
+	if err != nil {
+		return -1, nil, fmt.Errorf("create private root staging directory: %w", err)
+	}
+	stage := &overlayStage{path: stagePath, stageFD: -1, upperFD: -1, workFD: -1, lowerFD: -1, stagingMount: -1}
+	cleanupOnError := func(cause error) (int, *overlayStage, error) {
+		if cleanupErr := stage.cleanup(); cleanupErr != nil {
+			cause = errors.Join(cause, fmt.Errorf("clean private root staging: %w", cleanupErr))
+		}
+		return -1, nil, cause
+	}
+	stage.stageFD, err = openSecure(unix.AT_FDCWD, stagePath, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return cleanupOnError(fmt.Errorf("open private root staging directory: %w", err))
+	}
+	stage.stagingMount, err = mountTmpfs()
+	if err != nil {
+		return cleanupOnError(err)
+	}
+	if err := moveMount(stage.stagingMount, stage.stageFD); err != nil {
+		return cleanupOnError(fmt.Errorf("attach private root staging filesystem: %w", err))
+	}
+	stage.attached = true
+	if err := closeOwnedFD(&stage.stagingMount, "staging mount"); err != nil {
+		return cleanupOnError(err)
+	}
+	if err := closeOwnedFD(&stage.stageFD, "staging directory"); err != nil {
+		return cleanupOnError(err)
+	}
+	stage.stageFD, err = openSecure(unix.AT_FDCWD, stagePath, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return cleanupOnError(fmt.Errorf("reopen private root staging directory: %w", err))
+	}
+	if err := unix.Mkdirat(stage.stageFD, "upper", 0700); err != nil {
+		return cleanupOnError(fmt.Errorf("create private root upper directory: %w", err))
+	}
+	if err := unix.Mkdirat(stage.stageFD, "work", 0700); err != nil {
+		return cleanupOnError(fmt.Errorf("create private root work directory: %w", err))
+	}
+	if err := unix.Mkdirat(stage.stageFD, "lower", 0700); err != nil {
+		return cleanupOnError(fmt.Errorf("create private root lower directory: %w", err))
+	}
+	stage.upperFD, err = openSecure(stage.stageFD, "upper", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return cleanupOnError(fmt.Errorf("open private root upper directory: %w", err))
+	}
+	stage.workFD, err = openSecure(stage.stageFD, "work", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return cleanupOnError(fmt.Errorf("open private root work directory: %w", err))
+	}
+	stage.lowerFD, err = openSecure(stage.stageFD, "lower", unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return cleanupOnError(fmt.Errorf("open private root lower directory: %w", err))
+	}
+	lowerMount, err := cloneMount(lowerFD, true)
+	if err != nil {
+		return cleanupOnError(fmt.Errorf("clone rootfs for private lower layer: %w", err))
+	}
+	if err := moveMount(lowerMount, stage.lowerFD); err != nil {
+		closeErr := closeOwnedFD(&lowerMount, "lower mount")
+		return cleanupOnError(errors.Join(fmt.Errorf("attach private lower layer: %w", err), closeErr))
+	}
+	if err := closeOwnedFD(&lowerMount, "lower mount"); err != nil {
+		return cleanupOnError(err)
+	}
+	overlayFD, err := mountOverlay(filepath.Join(stagePath, "lower"), filepath.Join(stagePath, "upper"), filepath.Join(stagePath, "work"))
+	if err != nil {
+		return cleanupOnError(err)
+	}
+	return overlayFD, stage, nil
+}
+
+func mountTmpfs() (int, error) {
+	context, err := unix.Fsopen("tmpfs", unix.FSOPEN_CLOEXEC)
+	if err != nil {
+		return -1, fmt.Errorf("mount API fsopen tmpfs: %w", err)
+	}
+	defer unix.Close(context)
+	if err := unix.FsconfigCreate(context); err != nil {
+		return -1, fmt.Errorf("mount API create tmpfs: %w", err)
+	}
+	mountFD, err := unix.Fsmount(context, unix.FSMOUNT_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("mount API fsmount tmpfs: %w", err)
+	}
+	return mountFD, nil
+}
+
+func mountOverlay(lowerPath, upperPath, workPath string) (int, error) {
+	context, err := unix.Fsopen("overlay", unix.FSOPEN_CLOEXEC)
+	if err != nil {
+		return -1, fmt.Errorf("mount API fsopen overlay: %w", err)
+	}
+	defer unix.Close(context)
+	for _, setting := range []struct {
+		key  string
+		path string
+	}{
+		{key: "lowerdir+", path: lowerPath},
+		{key: "upperdir", path: upperPath},
+		{key: "workdir", path: workPath},
+	} {
+		if err := unix.FsconfigSetString(context, setting.key, setting.path); err != nil {
+			return -1, fmt.Errorf("mount API fsconfig overlay %s: %w", setting.key, err)
+		}
+	}
+	if err := unix.FsconfigCreate(context); err != nil {
+		return -1, fmt.Errorf("mount API create overlay: %w", err)
+	}
+	mountFD, err := unix.Fsmount(context, unix.FSMOUNT_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("mount API fsmount overlay: %w", err)
+	}
+	return mountFD, nil
 }
 
 func attachBindMount(rootMount, target int, bind config.BindMount, source int, isDir bool) error {

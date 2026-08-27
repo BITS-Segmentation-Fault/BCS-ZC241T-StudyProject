@@ -112,11 +112,14 @@ namespaces, `pivot_root`, `openat2`, the Linux new mount API
 (`open_tree`, `mount_setattr`, `move_mount`, and
 `fsopen`/`fsconfig`/`fsmount`), seccomp, and the required kernel policy are
 available.
-The configured rootfs must contain the command and its runtime
-files; statically linked payloads are the simplest option. `/proc` is mounted
-by the sandbox. The rootfs must already contain `/proc`, and must already
-contain `/etc/resolv.conf` when DNS servers are configured. Every bind target
-must also exist and match the source type; setup never creates target paths.
+The configured rootfs must contain the command and its runtime files; statically
+linked payloads are the simplest option. `/proc` is mounted by the sandbox. If
+the root must be writable, or a required mount target is missing, the sandbox
+assembles a private overlay and creates missing targets there. The configured
+rootfs is never changed. Existing targets must match their source type, and
+symlinked paths or unsafe target paths are rejected.
+`read_only_root: false` is a per-run writable overlay: changes disappear when
+the sandbox exits and are never written back to the rootfs source.
 
 Bridge mode additionally requires effective `CAP_NET_ADMIN`, trusted `ip` and
 `iptables` commands, and enabled IPv4 forwarding. It creates uniquely named

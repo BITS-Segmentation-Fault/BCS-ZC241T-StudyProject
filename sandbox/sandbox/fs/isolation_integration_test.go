@@ -102,6 +102,98 @@ func TestDescriptorBoundTargetReplacement(t *testing.T) {
 	runMountNamespaceTest(t, "target", root)
 }
 
+func TestSynthesizedMountTargets(t *testing.T) {
+	if os.Getenv("SANDBOX_FS_TEST") == "synthesized" {
+		if err := runSynthesizedMountAssembly(os.Getenv("SANDBOX_FS_ROOT")); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	requireMountNamespace(t, true)
+	root := t.TempDir()
+	if err := makeMinimalMountFixture(root); err != nil {
+		t.Fatal(err)
+	}
+	runMountNamespaceTest(t, "synthesized", root)
+	for _, path := range []string{"work", "proc", "etc", "ephemeral"} {
+		if _, err := os.Lstat(filepath.Join(root, "rootfs", path)); !os.IsNotExist(err) {
+			t.Fatalf("synthesized target %q changed source rootfs: %v", path, err)
+		}
+	}
+}
+
+func TestRawOverlayAssembly(t *testing.T) {
+	if os.Getenv("SANDBOX_FS_TEST") == "overlay" {
+		if err := runRawOverlayAssembly(os.Getenv("SANDBOX_FS_ROOT")); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	requireMountNamespace(t, false)
+	root := t.TempDir()
+	if err := makeMinimalMountFixture(root); err != nil {
+		t.Fatal(err)
+	}
+	runMountNamespaceTest(t, "overlay", root)
+	for _, path := range []string{"work", "ephemeral"} {
+		if _, err := os.Lstat(filepath.Join(root, "rootfs", path)); !os.IsNotExist(err) {
+			t.Fatalf("overlay target %q changed source rootfs: %v", path, err)
+		}
+	}
+}
+
+func TestOverlaySetupFailureCleansStaging(t *testing.T) {
+	if os.Getenv("SANDBOX_FS_TEST") == "overlay-failure" {
+		if err := runOverlaySetupFailure(); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	requireMountNamespace(t, false)
+	runMountNamespaceTest(t, "overlay-failure", "")
+}
+
+func TestReadOnlySynthesizedMountTargets(t *testing.T) {
+	if os.Getenv("SANDBOX_FS_TEST") == "readonly" {
+		if err := runReadOnlySynthesizedMountAssembly(os.Getenv("SANDBOX_FS_ROOT")); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	requireMountNamespace(t, true)
+	root := t.TempDir()
+	if err := makeMinimalMountFixture(root); err != nil {
+		t.Fatal(err)
+	}
+	runMountNamespaceTest(t, "readonly", root)
+	for _, path := range []string{"work", "license", "writable", "proc", "etc", "root-created"} {
+		if _, err := os.Lstat(filepath.Join(root, "rootfs", path)); !os.IsNotExist(err) {
+			t.Fatalf("read-only synthesized target %q changed source rootfs: %v", path, err)
+		}
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "source-writable")); err != nil || string(data) != "file-source\n1\n" {
+		t.Fatalf("writable bind source = %q, err=%v", data, err)
+	}
+}
+
+func TestReadOnlyRootKeepsNestedMountReadOnly(t *testing.T) {
+	if os.Getenv("SANDBOX_FS_TEST") == "readonly-nested" {
+		if err := runReadOnlyRootWithNestedMount(os.Getenv("SANDBOX_FS_ROOT")); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	requireMountNamespace(t, true)
+	root := t.TempDir()
+	if err := makeMinimalMountFixture(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "rootfs", "nested"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runMountNamespaceTest(t, "readonly-nested", root)
+}
+
 func requireMountNamespace(t *testing.T, needProc bool) {
 	t.Helper()
 	if _, err := exec.LookPath("unshare"); err != nil {
@@ -148,9 +240,14 @@ func TestMountAPIErrorClassification(t *testing.T) {
 func runMountNamespaceTest(t *testing.T, mode, root string) {
 	t.Helper()
 	testName := map[string]string{
-		"assembly": "TestDescriptorBoundMountAssembly",
-		"source":   "TestDescriptorBoundSourceReplacement",
-		"target":   "TestDescriptorBoundTargetReplacement",
+		"assembly":        "TestDescriptorBoundMountAssembly",
+		"source":          "TestDescriptorBoundSourceReplacement",
+		"target":          "TestDescriptorBoundTargetReplacement",
+		"synthesized":     "TestSynthesizedMountTargets",
+		"overlay":         "TestRawOverlayAssembly",
+		"overlay-failure": "TestOverlaySetupFailureCleansStaging",
+		"readonly":        "TestReadOnlySynthesizedMountTargets",
+		"readonly-nested": "TestReadOnlyRootKeepsNestedMountReadOnly",
 	}[mode]
 	command := exec.Command("unshare", "-Urnm", "--", os.Args[0], "-test.run=^"+testName+"$")
 	command.Env = append(os.Environ(), "SANDBOX_FS_TEST="+mode, "SANDBOX_FS_ROOT="+root)
@@ -351,6 +448,166 @@ func runTargetReplacement(root string) error {
 	return nil
 }
 
+func runSynthesizedMountAssembly(root string) error {
+	rootfs := filepath.Join(root, "rootfs")
+	binds := []config.BindMount{
+		{HostPath: filepath.Join(root, "source-dir"), ContainerPath: "/work"},
+		{HostPath: filepath.Join(root, "source-file"), ContainerPath: "/license"},
+	}
+	if err := IsolateRootFS(rootfs, binds, false, []string{"1.1.1.1"}); err != nil {
+		return err
+	}
+	if got, err := os.ReadFile("/work/marker"); err != nil || string(got) != "directory-source\n" {
+		return fmt.Errorf("synthesized directory bind = %q, err=%v", got, err)
+	}
+	if got, err := os.ReadFile("/license"); err != nil || string(got) != "file-source\n" {
+		return fmt.Errorf("synthesized file bind = %q, err=%v", got, err)
+	}
+	if got, err := os.ReadFile("/etc/resolv.conf"); err != nil || string(got) != "nameserver 1.1.1.1\n" {
+		return fmt.Errorf("synthesized DNS target = %q, err=%v", got, err)
+	}
+	if _, err := os.ReadFile("/proc/self/status"); err != nil {
+		return fmt.Errorf("synthesized proc target is not mounted: %w", err)
+	}
+	if err := os.WriteFile("/ephemeral", []byte("private\n"), 0600); err != nil {
+		return fmt.Errorf("write private root: %w", err)
+	}
+	return nil
+}
+
+func runRawOverlayAssembly(root string) error {
+	rootfs := filepath.Join(root, "rootfs")
+	if err := unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""); err != nil {
+		return fmt.Errorf("make mount namespace private: %w", err)
+	}
+	rootFD, err := openSecure(unix.AT_FDCWD, rootfs, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(rootFD)
+	overlayFD, stage, err := createOverlayRoot(rootFD)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stage.cleanup() }()
+	defer unix.Close(overlayFD)
+	if err := moveMount(overlayFD, rootFD); err != nil {
+		return fmt.Errorf("attach raw overlay root: %w", err)
+	}
+	if target, err := openOrCreateTarget(overlayFD, "/work", true); err != nil {
+		return err
+	} else if err := unix.Close(target); err != nil {
+		return err
+	}
+	if target, err := openOrCreateTarget(overlayFD, "/ephemeral", false); err != nil {
+		return err
+	} else if err := unix.Close(target); err != nil {
+		return err
+	}
+	if err := setRecursiveMountAttrs(overlayFD, unix.MountAttr{Attr_set: unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NODEV}); err != nil {
+		return err
+	}
+	if err := unix.Fchdir(overlayFD); err != nil {
+		return err
+	}
+	if err := os.WriteFile("ephemeral", []byte("private\n"), 0600); err != nil {
+		return err
+	}
+	if err := stage.cleanup(); err != nil {
+		return fmt.Errorf("cleanup raw overlay staging: %w", err)
+	}
+	return nil
+}
+
+func runOverlaySetupFailure() error {
+	before, err := filepath.Glob(filepath.Join(os.TempDir(), "sandbox-overlay-*"))
+	if err != nil {
+		return err
+	}
+	if _, stage, err := createOverlayRoot(-1); err == nil {
+		return fmt.Errorf("invalid lower descriptor unexpectedly created an overlay")
+	} else if stage != nil {
+		return fmt.Errorf("failed overlay returned staging state")
+	}
+	after, err := filepath.Glob(filepath.Join(os.TempDir(), "sandbox-overlay-*"))
+	if err != nil {
+		return err
+	}
+	for _, path := range after {
+		found := false
+		for _, oldPath := range before {
+			if path == oldPath {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("failed overlay left staging directory %q", path)
+		}
+	}
+	return nil
+}
+
+func runReadOnlySynthesizedMountAssembly(root string) error {
+	rootfs := filepath.Join(root, "rootfs")
+	binds := []config.BindMount{
+		{HostPath: filepath.Join(root, "source-dir"), ContainerPath: "/work"},
+		{HostPath: filepath.Join(root, "source-file"), ContainerPath: "/license"},
+		{HostPath: filepath.Join(root, "source-writable"), ContainerPath: "/writable", Writable: true},
+	}
+	if err := IsolateRootFS(rootfs, binds, true, []string{"1.1.1.1"}); err != nil {
+		return err
+	}
+	if got, err := os.ReadFile("/work/marker"); err != nil || string(got) != "directory-source\n" {
+		return fmt.Errorf("read-only synthesized directory bind = %q, err=%v", got, err)
+	}
+	if got, err := os.ReadFile("/license"); err != nil || string(got) != "file-source\n" {
+		return fmt.Errorf("read-only synthesized file bind = %q, err=%v", got, err)
+	}
+	if got, err := os.ReadFile("/etc/resolv.conf"); err != nil || string(got) != "nameserver 1.1.1.1\n" {
+		return fmt.Errorf("read-only synthesized DNS target = %q, err=%v", got, err)
+	}
+	if _, err := os.ReadFile("/proc/self/status"); err != nil {
+		return fmt.Errorf("read-only synthesized proc target is not mounted: %w", err)
+	}
+	if err := os.WriteFile("/root-created", []byte("forbidden"), 0600); err == nil {
+		return fmt.Errorf("read-only root accepted a write")
+	}
+	file, err := os.OpenFile("/writable", os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		return fmt.Errorf("open writable bind: %w", err)
+	}
+	if _, err := file.WriteString("1\n"); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write writable bind: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close writable bind: %w", err)
+	}
+	return nil
+}
+
+func runReadOnlyRootWithNestedMount(root string) error {
+	rootfs := filepath.Join(root, "rootfs")
+	nested := filepath.Join(rootfs, "nested")
+	if err := unix.Mount("tmpfs", nested, "tmpfs", 0, "size=4096"); err != nil {
+		return fmt.Errorf("mount nested rootfs: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "marker"), []byte("nested\n"), 0600); err != nil {
+		return err
+	}
+	if err := IsolateRootFS(rootfs, nil, true, nil); err != nil {
+		return err
+	}
+	if got, err := os.ReadFile("/nested/marker"); err != nil || string(got) != "nested\n" {
+		return fmt.Errorf("nested rootfs mount = %q, err=%v", got, err)
+	}
+	if err := os.WriteFile("/nested/created", []byte("forbidden"), 0600); err == nil {
+		return fmt.Errorf("read-only root allowed a nested mount write")
+	}
+	return nil
+}
+
 func readAt(rootFD int, path string) ([]byte, error) {
 	how := &unix.OpenHow{Flags: unix.O_RDONLY | unix.O_CLOEXEC, Resolve: beneathResolve}
 	fd, err := unix.Openat2(rootFD, path, how)
@@ -377,6 +634,22 @@ func makeMountFixture(root string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(root, "source", "bound"), []byte("opened-source\n"), 0644)
+}
+
+func makeMinimalMountFixture(root string) error {
+	if err := os.MkdirAll(filepath.Join(root, "rootfs"), 0755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(root, "source-dir"), 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "source-dir", "marker"), []byte("directory-source\n"), 0644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(root, "source-file"), []byte("file-source\n"), 0644); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(root, "source-writable"), []byte("file-source\n"), 0644)
 }
 
 func skipMountNamespace(t *testing.T, reason string) {

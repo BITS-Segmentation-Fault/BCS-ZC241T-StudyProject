@@ -85,6 +85,48 @@ func TestOpenTargetRejectsSymlinkAndAcceptsExistingTarget(t *testing.T) {
 	}
 }
 
+func TestOpenOrCreateTargetCreatesOnlyRelativeTargets(t *testing.T) {
+	root := t.TempDir()
+	rootFD, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(rootFD)
+
+	directory, err := openOrCreateTarget(rootFD, "/etc/work", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(directory)
+	file, err := openOrCreateTarget(rootFD, "/etc/resolv.conf", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(file)
+	if _, err := os.Stat(filepath.Join(root, "etc", "work")); err != nil {
+		t.Fatalf("created directory is missing: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "etc", "resolv.conf")); err != nil {
+		t.Fatalf("created file is missing: %v", err)
+	}
+}
+
+func TestOpenOrCreateTargetRejectsSymlinkedParent(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "etc")); err != nil {
+		t.Fatal(err)
+	}
+	rootFD, err := unix.Open(root, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(rootFD)
+	if _, err := openOrCreateTarget(rootFD, "/etc/work", true); err == nil {
+		t.Fatal("openOrCreateTarget followed a symlink")
+	}
+}
+
 func TestRequireSameType(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "source")
@@ -159,5 +201,56 @@ func TestDNSMemfdIsCompleteAndSealed(t *testing.T) {
 	required := unix.F_SEAL_SEAL | unix.F_SEAL_SHRINK | unix.F_SEAL_GROW | unix.F_SEAL_WRITE
 	if seals&required != required {
 		t.Fatalf("DNS seals = %#x, want %#x", seals, required)
+	}
+}
+
+func TestOverlayStageCleanupIsRepeatable(t *testing.T) {
+	path := t.TempDir()
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := &overlayStage{path: path, stageFD: fd, upperFD: -1, workFD: -1, lowerFD: -1, stagingMount: -1}
+	if err := stage.cleanup(); err != nil {
+		t.Fatal(err)
+	}
+	if stage.path != "" || stage.stageFD != -1 {
+		t.Fatalf("cleanup left stage state: %+v", stage)
+	}
+	if err := stage.cleanup(); err != nil {
+		t.Fatalf("second cleanup failed: %v", err)
+	}
+}
+
+func TestOverlayStageCleanupDoesNotReuseClosedDescriptor(t *testing.T) {
+	path := t.TempDir()
+	if err := os.WriteFile(filepath.Join(path, "busy"), []byte("busy"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := &overlayStage{path: path, stageFD: fd, upperFD: -1, workFD: -1, lowerFD: -1, stagingMount: -1}
+	if err := stage.cleanup(); err == nil {
+		t.Fatal("cleanup unexpectedly removed a non-empty staging directory")
+	}
+	if stage.stageFD != -1 {
+		t.Fatalf("cleanup retained a descriptor after taking ownership: %d", stage.stageFD)
+	}
+
+	openFD, err := unix.Open("/dev/null", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(openFD)
+	if err := os.Remove(filepath.Join(path, "busy")); err != nil {
+		t.Fatal(err)
+	}
+	if err := stage.cleanup(); err != nil {
+		t.Fatalf("cleanup retry failed: %v", err)
+	}
+	if err := unix.Fstat(openFD, &unix.Stat_t{}); err != nil {
+		t.Fatalf("cleanup closed an unrelated descriptor: %v", err)
 	}
 }
