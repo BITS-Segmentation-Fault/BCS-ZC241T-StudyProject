@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 )
@@ -12,15 +13,23 @@ import (
 const maxConfigBytes = 1 << 20
 
 func LoadConfig(path string) (*Config, error) {
-	f, err := os.Open(path)
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("value_error: cannot resolve config file %q: %w", path, err)
+	}
+	f, err := os.Open(absolutePath)
 	if err != nil {
 		return nil, fmt.Errorf("value_error: cannot open config file %q: %w", path, err)
 	}
 	defer f.Close()
-	return LoadConfigFromReader(f)
+	return loadConfigFromReader(f, filepath.Dir(absolutePath))
 }
 
 func LoadConfigFromReader(r io.Reader) (*Config, error) {
+	return loadConfigFromReader(r, "")
+}
+
+func loadConfigFromReader(r io.Reader, baseDir string) (*Config, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxConfigBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("value_error: read config: %w", err)
@@ -41,8 +50,23 @@ func LoadConfigFromReader(r io.Reader) (*Config, error) {
 		}
 		return nil, fmt.Errorf("value_error: trailing config data: %w", err)
 	}
+	resolveConfigPaths(&cfg, baseDir)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+func resolveConfigPaths(cfg *Config, baseDir string) {
+	if baseDir == "" {
+		return
+	}
+	if cfg.RootFSSource != "" && !filepath.IsAbs(cfg.RootFSSource) {
+		cfg.RootFSSource = filepath.Join(baseDir, cfg.RootFSSource)
+	}
+	for i := range cfg.BindMounts {
+		if cfg.BindMounts[i].HostPath != "" && !filepath.IsAbs(cfg.BindMounts[i].HostPath) {
+			cfg.BindMounts[i].HostPath = filepath.Join(baseDir, cfg.BindMounts[i].HostPath)
+		}
+	}
 }

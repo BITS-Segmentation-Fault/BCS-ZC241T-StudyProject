@@ -89,6 +89,13 @@ verified on every reuse. Remote rootfs launches must keep
 `read_only_root: true`; local and remote rootfs sources cannot be combined. A failed remote
 download never falls back to the built-in Alpine rootfs.
 
+When a configuration is loaded from a YAML file, a non-empty relative
+`rootfs_source` and each non-empty relative `bind_mounts[].host_path` are
+resolved relative to that file's directory. Empty host paths remain invalid.
+`working_dir` and bind `container_path` values are sandbox paths and are not
+resolved against the YAML file. Reader-based configuration loading has no
+filename context, so it continues to require absolute host paths.
+
 The namespace-free archive maintenance check can be run with
 `SANDBOX_ALPINE_MAINTENANCE=1`; it downloads both pinned archives, verifies
 their archive digests, securely extracts them, and verifies their tree digests.
