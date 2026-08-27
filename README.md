@@ -28,6 +28,14 @@ With a freshly built binary, the equivalent first-run command is:
 ./sandbox-bin --network-mode=none -- /bin/echo "hello world"
 ```
 
+For an interactive terminal session, use `--interactive` (or `-i`) with a
+terminal-oriented payload:
+
+```bash
+sandbox-bin --interactive -- /bin/bash -i
+sandbox-bin -i -- /usr/bin/python3 -i
+```
+
 Bazel mirrors the module and packages the executable without writing build
 outputs into the source tree:
 
@@ -163,6 +171,16 @@ keys are rejected.
 
 Standard output belongs to the payload. Sandbox diagnostics, including setup
 failures, are written to standard error.
+
+Interactive mode is also available in YAML with `interactive: true`. It
+requires stdin to be a terminal; redirected stdout is allowed, but payload
+stdout and stderr are merged by the PTY. The host terminal is restored on
+return, `SIGWINCH` resizes the PTY, and an unsuccessful resize keeps the last
+known size. An explicit `TERM` in the configuration is preserved; otherwise a
+short conservative host `TERM` value is copied, with invalid or missing values
+replaced by `TERM=dumb`. `COLORTERM` is not copied by this policy. Ordinary
+piped commands should omit interactive mode and retain separate standard
+input, output, and error streams.
 
 Storage uses `RLIMIT_FSIZE`, which is a per-file size limit rather than a
 total disk quota. Set `file_size_limit_mb` or `--file-size-limit`; zero

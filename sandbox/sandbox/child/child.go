@@ -46,7 +46,7 @@ func Child(p2cRFd int) int {
 		}
 	}
 
-	if err := fs.IsolateRootFS(cfg.RootFSSource, cfg.BindMounts, cfg.ReadOnlyRoot, cfg.DNSServers); err != nil {
+	if err := fs.IsolateRootFS(cfg.RootFSSource, cfg.BindMounts, cfg.ReadOnlyRoot, cfg.DNSServers, cfg.Interactive); err != nil {
 		childLog(fmt.Sprintf("JAIL FAILURE: %v", err))
 		return 1
 	}

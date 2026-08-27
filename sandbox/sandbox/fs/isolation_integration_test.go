@@ -351,7 +351,7 @@ func runDescriptorBoundMountAssembly(root string) error {
 		return err
 	}
 	binds := []config.BindMount{{HostPath: source, ContainerPath: "/mnt"}}
-	if err := IsolateRootFS(rootfs, binds, true, []string{"1.1.1.1", "2001:4860:4860::8888"}); err != nil {
+	if err := IsolateRootFS(rootfs, binds, true, []string{"1.1.1.1", "2001:4860:4860::8888"}, false); err != nil {
 		return err
 	}
 	if got, err := os.ReadFile("/mnt/bound"); err != nil || string(got) != "opened-source\n" {
@@ -640,7 +640,7 @@ func runSynthesizedMountAssembly(root string) error {
 		{HostPath: filepath.Join(root, "source-dir"), ContainerPath: "/work"},
 		{HostPath: filepath.Join(root, "source-file"), ContainerPath: "/license"},
 	}
-	if err := IsolateRootFS(rootfs, binds, false, []string{"1.1.1.1"}); err != nil {
+	if err := IsolateRootFS(rootfs, binds, false, []string{"1.1.1.1"}, false); err != nil {
 		return err
 	}
 	if got, err := os.ReadFile("/work/marker"); err != nil || string(got) != "directory-source\n" {
@@ -741,7 +741,7 @@ func runReadOnlySynthesizedMountAssembly(root string) error {
 		{HostPath: filepath.Join(root, "source-file"), ContainerPath: "/license"},
 		{HostPath: filepath.Join(root, "source-writable"), ContainerPath: "/writable", Writable: true},
 	}
-	if err := IsolateRootFS(rootfs, binds, true, []string{"1.1.1.1"}); err != nil {
+	if err := IsolateRootFS(rootfs, binds, true, []string{"1.1.1.1"}, false); err != nil {
 		return err
 	}
 	if got, err := os.ReadFile("/work/marker"); err != nil || string(got) != "directory-source\n" {
@@ -782,7 +782,7 @@ func runReadOnlyRootWithNestedMount(root string) error {
 	if err := os.WriteFile(filepath.Join(nested, "marker"), []byte("nested\n"), 0600); err != nil {
 		return err
 	}
-	if err := IsolateRootFS(rootfs, nil, true, nil); err != nil {
+	if err := IsolateRootFS(rootfs, nil, true, nil, false); err != nil {
 		return err
 	}
 	if got, err := os.ReadFile("/nested/marker"); err != nil || string(got) != "nested\n" {

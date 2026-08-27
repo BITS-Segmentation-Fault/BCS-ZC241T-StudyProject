@@ -37,10 +37,12 @@ var privateDeviceSources = []trustedDevice{
 	{name: "urandom", path: "/dev/urandom", major: 1, minor: 9, fd: -1},
 }
 
+var interactiveDeviceSource = trustedDevice{name: "tty", path: "/dev/tty", major: 5, minor: 0, fd: -1}
+
 // IsolateRootFS creates and enters the isolated root. It intentionally uses
 // only the new mount API after the initial openat2 lookups: older kernels are
 // rejected instead of receiving a race-prone path-based fallback.
-func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoot bool, dnsServers []string) (retErr error) {
+func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoot bool, dnsServers []string, interactive bool) (retErr error) {
 	if err := validateIsolationPath("rootfs", rootfsPath); err != nil {
 		return err
 	}
@@ -53,7 +55,7 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 		return fmt.Errorf("pre-flight error: cannot open rootfs %q without symlinks: %w", rootfsPath, err)
 	}
 	defer unix.Close(rootFD)
-	devices, err := openTrustedDeviceSources()
+	devices, err := openTrustedDeviceSources(interactive)
 	if err != nil {
 		return fmt.Errorf("pre-flight error: cannot open trusted device sources: %w", err)
 	}
@@ -325,9 +327,10 @@ func openBindSource(path string) (int, bool, error) {
 	return fd, sourceType == unix.S_IFDIR, nil
 }
 
-func openTrustedDeviceSources() ([]trustedDevice, error) {
-	devices := make([]trustedDevice, len(privateDeviceSources))
-	copy(devices, privateDeviceSources)
+func openTrustedDeviceSources(interactive bool) ([]trustedDevice, error) {
+	deviceSources := trustedDeviceSources(interactive)
+	devices := make([]trustedDevice, len(deviceSources))
+	copy(devices, deviceSources)
 	for index := range devices {
 		device := &devices[index]
 		fd, err := openSecure(unix.AT_FDCWD, device.path, unix.O_PATH|unix.O_CLOEXEC, 0)
@@ -342,6 +345,14 @@ func openTrustedDeviceSources() ([]trustedDevice, error) {
 		}
 	}
 	return devices, nil
+}
+
+func trustedDeviceSources(interactive bool) []trustedDevice {
+	devices := append([]trustedDevice(nil), privateDeviceSources...)
+	if interactive {
+		devices = append(devices, interactiveDeviceSource)
+	}
+	return devices
 }
 
 func closeTrustedDeviceSources(devices []trustedDevice) {

@@ -41,6 +41,7 @@ type RemoteRootFS struct {
 
 type Config struct {
 	Command              []string             `yaml:"command"`
+	Interactive          bool                 `yaml:"interactive"`
 	EnvVars              []string             `yaml:"env_vars"`
 	ReadOnlyRoot         bool                 `yaml:"read_only_root"`
 	BlockedSyscallAction SeccompAction        `yaml:"blocked_syscall_action"`

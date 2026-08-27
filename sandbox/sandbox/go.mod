@@ -6,7 +6,11 @@ require golang.org/x/sys v0.46.0
 
 require github.com/mholt/archives v0.1.5
 
-require gopkg.in/yaml.v3 v3.0.1
+require (
+	github.com/creack/pty v1.1.24
+	golang.org/x/term v0.38.0
+	gopkg.in/yaml.v3 v3.0.1
+)
 
 require (
 	github.com/STARRY-S/zip v0.2.3 // indirect

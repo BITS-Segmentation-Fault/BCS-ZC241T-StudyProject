@@ -28,7 +28,22 @@ func Parent(cfg config.Config) (result int) {
 		log.Printf("[PRE-FLIGHT ERROR] invalid syscall policy: %v", err)
 		return 1
 	}
+	var terminal *interactiveTerminal
+	var configuredTERM string
+	var hasConfiguredTERM bool
+	if cfg.Interactive {
+		var err error
+		terminal, err = newInteractiveTerminal(os.Stdin, os.Stdout)
+		if err != nil {
+			log.Printf("[PRE-FLIGHT ERROR] %v", err)
+			return 1
+		}
+		configuredTERM, hasConfiguredTERM = configuredEnvironmentValue(cfg.EnvVars, "TERM")
+	}
 	cfg = snapshotEnvironment(cfg, os.Environ())
+	if cfg.Interactive {
+		cfg.EnvVars = interactiveEnvironment(cfg.EnvVars, os.Getenv("TERM"), configuredTERM, hasConfiguredTERM)
+	}
 	renderer := newProgressRenderer(os.Stderr)
 	defer renderer.finish()
 	provisioner := rootfs.Provisioner{Progress: renderer.report}
@@ -100,9 +115,6 @@ func Parent(cfg config.Config) (result int) {
 	}
 	defer closeFiles(p2cR, p2cW)
 	cmd := exec.Command("/proc/self/exe", "--internal-child")
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	cmd.Env = internalChildEnvironment(cfg.EnvVars)
 	cmd.ExtraFiles = []*os.File{p2cR}
 
@@ -110,22 +122,51 @@ func Parent(cfg config.Config) (result int) {
 	if cfg.NetworkMode.RequiresNetNS() {
 		cloneFlags |= syscall.CLONE_NEWNET
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{
+	attributes := &syscall.SysProcAttr{
 		Cloneflags:                 cloneFlags,
-		Setpgid:                    true,
+		Setpgid:                    !cfg.Interactive,
 		Pdeathsig:                  syscall.SIGKILL,
 		GidMappingsEnableSetgroups: false,
 		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
 		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
 	}
+	if cfg.Interactive {
+		attributes.Setsid = true
+		attributes.Setctty = true
+		attributes.Ctty = 0
+	}
 
-	if err := cmd.Start(); err != nil {
-		log.Printf("[PRE-FLIGHT ERROR] cannot start isolated child: %v", err)
+	var startErr error
+	if terminal != nil {
+		startErr = terminal.start(cmd, attributes)
+	} else {
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.SysProcAttr = attributes
+		startErr = cmd.Start()
+	}
+	if startErr != nil {
+		log.Printf("[PRE-FLIGHT ERROR] cannot start isolated child: %v", startErr)
 		return 1
 	}
 
+	if terminal != nil {
+		defer func() {
+			if err := terminal.close(); err != nil {
+				log.Printf("[TERMINAL] cleanup failed: %v", err)
+				if result == 0 {
+					result = 1
+				}
+			}
+		}()
+	}
 	closeFiles(p2cR)
 	childReaped := false
+	if terminal != nil {
+		stopResize := terminal.watchResize()
+		defer stopResize()
+	}
 	defer func() {
 		if !childReaped {
 			terminateChild(cmd)
@@ -144,6 +185,12 @@ func Parent(cfg config.Config) (result int) {
 		}
 	}
 
+	if terminal != nil {
+		if err := terminal.makeRaw(); err != nil {
+			log.Printf("[TERMINAL] %v", err)
+			return 1
+		}
+	}
 	if err := ipc.WriteConfig(p2cW, cfg); err != nil {
 		log.Printf("[SANDBOX] configuration snapshot failed: %v", err)
 		return 1

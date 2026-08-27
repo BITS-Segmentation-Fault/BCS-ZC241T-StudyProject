@@ -20,6 +20,7 @@ type cliValues struct {
 	bridgeContainer *string
 	envWhitelist    *string
 	fileSizeLimit   *int
+	interactive     *bool
 }
 
 type parsedCLI struct {
@@ -29,6 +30,9 @@ type parsedCLI struct {
 }
 
 func registerFlags(fs *flag.FlagSet, defaults config.Config) cliValues {
+	interactive := defaults.Interactive
+	fs.BoolVar(&interactive, "interactive", defaults.Interactive, "Run with an interactive terminal")
+	fs.BoolVar(&interactive, "i", defaults.Interactive, "Run with an interactive terminal")
 	return cliValues{
 		configFile:      fs.String("config", "", "Load configuration from a YAML file"),
 		networkMode:     fs.String("network-mode", string(defaults.NetworkMode), "Network namespace mode"),
@@ -37,6 +41,7 @@ func registerFlags(fs *flag.FlagSet, defaults config.Config) cliValues {
 		bridgeContainer: fs.String("bridge-container-ip", defaults.BridgeConfig.ContainerIP, "Container bridge address"),
 		envWhitelist:    fs.String("env-whitelist", strings.Join(defaults.EnvWhitelist, ","), "Host environment keys to copy"),
 		fileSizeLimit:   fs.Int("file-size-limit", defaults.FileSizeLimitMB, "Per-file size limit in MiB"),
+		interactive:     &interactive,
 	}
 }
 
@@ -89,6 +94,9 @@ func parseArgs(argv []string) (config.Config, error) {
 	}
 	if parsed.seen["file-size-limit"] {
 		cfg.FileSizeLimitMB = *values.fileSizeLimit
+	}
+	if parsed.seen["interactive"] || parsed.seen["i"] {
+		cfg.Interactive = *values.interactive
 	}
 	if len(parsed.args) > 0 {
 		if len(cfg.Command) > 0 {
