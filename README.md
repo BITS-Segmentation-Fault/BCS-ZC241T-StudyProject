@@ -85,7 +85,11 @@ The remote URL must be HTTPS and the archive SHA-256 is mandatory; it must be
 lowercase and exactly 64 hexadecimal characters. Remote archives are cached
 under their digest, never under their URL, and are extracted only after the
 downloaded bytes match that digest. The extracted tree is then hashed and
-verified on every reuse. Remote rootfs launches must keep
+verified on every reuse. Archive format is identified from content, so any
+unencrypted archive recognized by the pinned archive library may be used when
+its entries form a valid rootfs tree. Compressed files that are not archives
+and unsafe entry types are rejected, and archive metadata is not restored. Remote
+rootfs launches must keep
 `read_only_root: true`; local and remote rootfs sources cannot be combined. A failed remote
 download never falls back to the built-in Alpine rootfs.
 

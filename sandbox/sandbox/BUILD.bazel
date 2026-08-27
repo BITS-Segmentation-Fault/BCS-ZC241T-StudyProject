@@ -46,7 +46,10 @@ go_library(
     name = "rootfs",
     srcs = glob(["rootfs/*.go"], exclude = ["rootfs/*_test.go"]),
     importpath = "sandbox/sandbox/rootfs",
-    deps = ["@org_golang_x_sys//unix:go_default_library"],
+    deps = [
+        "@com_github_mholt_archives//:go_default_library",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
 )
 
 go_library(
@@ -180,7 +183,10 @@ go_test(
     name = "rootfs_test",
     srcs = glob(["rootfs/*.go"]),
     importpath = "sandbox/sandbox/rootfs",
-    deps = ["@org_golang_x_sys//unix:go_default_library"],
+    deps = [
+        "@com_github_mholt_archives//:go_default_library",
+        "@org_golang_x_sys//unix:go_default_library",
+    ],
 )
 
 go_test(

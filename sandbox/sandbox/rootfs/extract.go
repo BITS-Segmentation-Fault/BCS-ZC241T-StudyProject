@@ -4,13 +4,16 @@ package rootfs
 
 import (
 	"archive/tar"
-	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path"
 	"strings"
+
+	"github.com/mholt/archives"
 )
 
 // rootfsLimits bounds extracted and cached trees independently of archive size.
@@ -30,93 +33,173 @@ var defaultRootfsLimits = rootfsLimits{
 func extractArchive(archivePath, destination string, limits rootfsLimits) error {
 	archive, err := os.Open(archivePath)
 	if err != nil {
-		return fmt.Errorf("cannot open rootfs archive: %v", err)
+		return fmt.Errorf("cannot open rootfs archive: %w", err)
 	}
 	defer archive.Close()
 
-	compressed, err := gzip.NewReader(archive)
+	format, stream, err := archives.Identify(context.Background(), "", archive)
 	if err != nil {
-		return fmt.Errorf("cannot read rootfs gzip stream: %v", err)
+		return fmt.Errorf("cannot identify rootfs archive: %w", err)
 	}
-	defer compressed.Close()
+	extractor, ok := format.(archives.Extractor)
+	if !ok {
+		return fmt.Errorf("rootfs input is a recognized compressed file, not an archive")
+	}
 
-	reader := tar.NewReader(compressed)
 	entries := make(map[string]byte)
 	directoryModes := make(map[string]fs.FileMode)
 	var extractedBytes int64
 	entryCount := 0
-
-	for {
-		header, err := reader.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return fmt.Errorf("cannot read rootfs tar stream: %v", err)
-		}
+	err = extractor.Extract(context.Background(), stream, func(_ context.Context, file archives.FileInfo) error {
 		entryCount++
 		if entryCount > limits.MaxEntries {
 			return fmt.Errorf("rootfs archive exceeds the %d-entry limit", limits.MaxEntries)
 		}
-		if len(header.PAXRecords) != 0 || len(header.Xattrs) != 0 {
-			return fmt.Errorf("rootfs archive entry %q contains unsupported extended metadata", header.Name)
-		}
 
-		name, rootMarker, err := normalizeArchivePath(header.Name)
+		name, rootMarker, err := normalizeArchivePath(file.NameInArchive)
 		if err != nil {
 			return err
 		}
 		if rootMarker {
-			if header.Typeflag != tar.TypeDir {
-				return fmt.Errorf("rootfs archive root marker %q is not a directory", header.Name)
+			if !file.IsDir() {
+				return fmt.Errorf("rootfs archive root marker %q is not a directory", file.NameInArchive)
 			}
-			continue
+			return nil
 		}
-		if err := checkEntryConflicts(name, header.Typeflag, entries); err != nil {
+		kind, err := archiveEntryKind(file)
+		if err != nil {
+			return fmt.Errorf("rootfs archive entry %q: %w", name, err)
+		}
+		if err := checkEntryConflicts(name, kind, entries); err != nil {
 			return err
 		}
 		if err := ensureParentDirectories(destination, name); err != nil {
 			return err
 		}
 
-		switch header.Typeflag {
+		switch kind {
 		case tar.TypeDir:
-			if err := extractDirectory(destination, name, header.Mode, directoryModes); err != nil {
+			if err := extractDirectory(destination, name, int64(file.Mode().Perm()), directoryModes); err != nil {
 				return err
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			if header.Size < 0 || header.Size > limits.MaxFileBytes {
-				return fmt.Errorf("rootfs file %q exceeds the %d-byte file limit", name, limits.MaxFileBytes)
-			}
-			if extractedBytes > limits.MaxTotalBytes-header.Size {
-				return fmt.Errorf("rootfs archive exceeds the %d-byte extracted-data limit", limits.MaxTotalBytes)
-			}
-			if err := extractRegularFile(destination, name, header.Mode, header.Size, reader); err != nil {
+			if err := extractRegularFile(destination, name, file, limits, &extractedBytes); err != nil {
 				return err
 			}
-			extractedBytes += header.Size
 		case tar.TypeSymlink:
-			if err := validateInternalTarget(name, header.Linkname); err != nil {
+			if err := validateInternalTarget(name, file.LinkTarget); err != nil {
 				return err
 			}
-			if err := extractSymlink(destination, name, header.Linkname); err != nil {
+			if err := extractSymlink(destination, name, file.LinkTarget); err != nil {
 				return err
 			}
 		case tar.TypeLink:
-			if err := extractHardlink(destination, name, header.Linkname); err != nil {
+			if err := extractHardlink(destination, name, file.LinkTarget); err != nil {
 				return err
 			}
 		default:
-			return fmt.Errorf("rootfs archive entry %q uses unsupported type %d", name, header.Typeflag)
+			return fmt.Errorf("rootfs archive entry %q uses unsupported type", name)
 		}
-		entries[name] = header.Typeflag
+		entries[name] = kind
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("cannot extract rootfs archive: %w", err)
 	}
 
 	for name, mode := range directoryModes {
 		if err := os.Chmod(filepathJoin(destination, name), mode.Perm()); err != nil {
-			return fmt.Errorf("cannot apply mode to rootfs directory %q: %v", name, err)
+			return fmt.Errorf("cannot apply mode to rootfs directory %q: %w", name, err)
 		}
 	}
+	return nil
+}
+
+func archiveEntryKind(file archives.FileInfo) (byte, error) {
+	mode := file.Mode()
+	switch {
+	case mode.IsDir():
+		return tar.TypeDir, nil
+	case mode&fs.ModeSymlink != 0:
+		return tar.TypeSymlink, nil
+	case !mode.IsRegular():
+		return 0, fmt.Errorf("uses unsupported type")
+	}
+	if header, ok := file.Header.(*tar.Header); ok && header.Typeflag == tar.TypeLink {
+		return tar.TypeLink, nil
+	}
+	return tar.TypeReg, nil
+}
+
+func extractRegularFile(destination, name string, file archives.FileInfo, limits rootfsLimits, extractedBytes *int64) (err error) {
+	declaredSize := file.Size()
+	if declaredSize < 0 || declaredSize > limits.MaxFileBytes {
+		return fmt.Errorf("rootfs file %q exceeds the %d-byte file limit", name, limits.MaxFileBytes)
+	}
+	remaining := limits.MaxTotalBytes - *extractedBytes
+	if remaining < 0 {
+		return fmt.Errorf("rootfs archive exceeds the %d-byte extracted-data limit", limits.MaxTotalBytes)
+	}
+	readLimit := limits.MaxFileBytes
+	if remaining < readLimit {
+		readLimit = remaining
+	}
+	input, err := file.Open()
+	if err != nil {
+		return fmt.Errorf("cannot open rootfs file %q: %w", name, err)
+	}
+	defer func() {
+		if closeErr := input.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("cannot close rootfs file %q input: %w", name, closeErr))
+		}
+	}()
+
+	pathName := filepathJoin(destination, name)
+	output, err := os.OpenFile(pathName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, file.Mode().Perm())
+	if err != nil {
+		return fmt.Errorf("cannot create rootfs file %q: %w", name, err)
+	}
+	remove := true
+	defer func() {
+		if remove {
+			_ = os.Remove(pathName)
+		}
+	}()
+
+	count, copyErr := io.Copy(output, io.LimitReader(input, readLimit+1))
+	if copyErr != nil {
+		_ = output.Close()
+		return fmt.Errorf("cannot extract rootfs file %q: %w", name, copyErr)
+	}
+	if count > readLimit || count != declaredSize {
+		_ = output.Close()
+		if count > readLimit {
+			if readLimit == limits.MaxFileBytes {
+				return fmt.Errorf("rootfs file %q exceeds the %d-byte file limit", name, limits.MaxFileBytes)
+			}
+			return fmt.Errorf("rootfs archive exceeds the %d-byte extracted-data limit", limits.MaxTotalBytes)
+		}
+		return fmt.Errorf("rootfs file %q size changed while being extracted", name)
+	}
+	var extra [1]byte
+	extraCount, extraErr := input.Read(extra[:])
+	if extraCount != 0 {
+		_ = output.Close()
+		return fmt.Errorf("rootfs file %q contains more data than declared", name)
+	}
+	if extraErr != nil && extraErr != io.EOF {
+		_ = output.Close()
+		return fmt.Errorf("cannot finish rootfs file %q: %w", name, extraErr)
+	}
+	if err := output.Chmod(file.Mode().Perm()); err != nil {
+		_ = output.Close()
+		return fmt.Errorf("cannot apply mode to rootfs file %q: %w", name, err)
+	}
+	if err := output.Close(); err != nil {
+		return fmt.Errorf("cannot close rootfs file %q: %w", name, err)
+	}
+	remove = false
+	*extractedBytes += count
 	return nil
 }
 
@@ -212,29 +295,6 @@ func extractDirectory(destination, name string, mode int64, modes map[string]fs.
 		return fmt.Errorf("rootfs directory %q conflicts with an existing entry", name)
 	}
 	modes[name] = fs.FileMode(mode).Perm()
-	return nil
-}
-
-func extractRegularFile(destination, name string, mode int64, size int64, reader io.Reader) error {
-	pathName := filepathJoin(destination, name)
-	file, err := os.OpenFile(pathName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, fs.FileMode(mode).Perm())
-	if err != nil {
-		return fmt.Errorf("cannot create rootfs file %q: %v", name, err)
-	}
-	if _, err := io.CopyN(file, reader, size); err != nil {
-		file.Close()
-		os.Remove(pathName)
-		return fmt.Errorf("cannot extract rootfs file %q: %v", name, err)
-	}
-	if err := file.Chmod(fs.FileMode(mode).Perm()); err != nil {
-		file.Close()
-		os.Remove(pathName)
-		return fmt.Errorf("cannot apply mode to rootfs file %q: %v", name, err)
-	}
-	if err := file.Close(); err != nil {
-		os.Remove(pathName)
-		return fmt.Errorf("cannot close rootfs file %q: %v", name, err)
-	}
 	return nil
 }
 

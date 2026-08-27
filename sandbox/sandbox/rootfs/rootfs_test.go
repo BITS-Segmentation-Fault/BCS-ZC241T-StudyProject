@@ -4,6 +4,7 @@ package rootfs
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -24,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mholt/archives"
 	"golang.org/x/sys/unix"
 )
 
@@ -37,9 +40,22 @@ type archiveEntry struct {
 
 func makeArchive(t *testing.T, entries ...archiveEntry) []byte {
 	t.Helper()
+	tarBytes := makeTarArchive(t, entries...)
 	var output bytes.Buffer
 	compressed := gzip.NewWriter(&output)
-	tarWriter := tar.NewWriter(compressed)
+	if _, err := compressed.Write(tarBytes); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
+}
+
+func makeTarArchive(t *testing.T, entries ...archiveEntry) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	tarWriter := tar.NewWriter(&output)
 	for _, entry := range entries {
 		header := &tar.Header{
 			Name:     entry.name,
@@ -63,7 +79,48 @@ func makeArchive(t *testing.T, entries ...archiveEntry) []byte {
 	if err := tarWriter.Close(); err != nil {
 		t.Fatal(err)
 	}
+	return output.Bytes()
+}
+
+func makeZstdArchive(t *testing.T, tarBytes []byte) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	compressed, err := (archives.Zstd{}).OpenWriter(&output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compressed.Write(tarBytes); err != nil {
+		t.Fatal(err)
+	}
 	if err := compressed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
+}
+
+func makeZipArchive(t *testing.T, entries ...archiveEntry) []byte {
+	t.Helper()
+	var output bytes.Buffer
+	writer := zip.NewWriter(&output)
+	for _, entry := range entries {
+		name := strings.TrimPrefix(entry.name, "./")
+		if name == "" {
+			continue
+		}
+		if entry.kind == tar.TypeDir && !strings.HasSuffix(name, "/") {
+			name += "/"
+		}
+		header := &zip.FileHeader{Name: name, Method: zip.Deflate}
+		header.SetMode(fs.FileMode(entry.mode))
+		file, err := writer.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Write(entry.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return output.Bytes()
@@ -841,8 +898,65 @@ func TestCorruptArchiveIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := extractArchive(archivePath, filepath.Join(t.TempDir(), "rootfs"), defaultRootfsLimits)
-	if err == nil || !strings.Contains(err.Error(), "gzip") {
-		t.Fatalf("extractArchive() error = %v, want gzip error", err)
+	if err == nil || !strings.Contains(err.Error(), "identify") {
+		t.Fatalf("extractArchive() error = %v, want archive-identification error", err)
+	}
+}
+
+func TestExtractRecognizedArchiveFormats(t *testing.T) {
+	entries := []archiveEntry{
+		{name: "./", kind: tar.TypeDir, mode: 0755},
+		{name: "./bin/", kind: tar.TypeDir, mode: 0755},
+		{name: "./bin/hello", kind: tar.TypeReg, mode: 0755, body: []byte("hello")},
+	}
+	tarBytes := makeTarArchive(t, entries...)
+	compressedTar := makeArchive(t, entries...)
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "tar", body: tarBytes},
+		{name: "gzip tar", body: compressedTar},
+		{name: "zstd tar", body: makeZstdArchive(t, tarBytes)},
+		{name: "zip", body: makeZipArchive(t, entries...)},
+	}
+
+	var want string
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			archivePath := filepath.Join(t.TempDir(), "input")
+			if err := os.WriteFile(archivePath, tt.body, 0600); err != nil {
+				t.Fatal(err)
+			}
+			root := filepath.Join(t.TempDir(), "rootfs")
+			if err := os.Mkdir(root, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := extractArchive(archivePath, root, defaultRootfsLimits); err != nil {
+				t.Fatalf("extractArchive() error = %v", err)
+			}
+			got, err := treeDigest(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want == "" {
+				want = got
+			} else if got != want {
+				t.Fatalf("tree digest = %s, want %s", got, want)
+			}
+		})
+	}
+
+	archivePath := filepath.Join(t.TempDir(), "invalid")
+	if err := os.WriteFile(archivePath, []byte("not an archive"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "rootfs")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := extractArchive(archivePath, root, defaultRootfsLimits); err == nil {
+		t.Fatal("extractArchive() accepted an unrecognized stream")
 	}
 }
 
