@@ -18,7 +18,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -138,6 +137,25 @@ func minimalArchive(t *testing.T) []byte {
 	)
 }
 
+func restrictiveArchive(t *testing.T) []byte {
+	return makeArchive(t,
+		archiveEntry{name: "./", kind: tar.TypeDir, mode: 0755},
+		archiveEntry{name: "./var/", kind: tar.TypeDir, mode: 0755},
+		archiveEntry{name: "./var/lib/", kind: tar.TypeDir, mode: 0755},
+		archiveEntry{name: "./var/lib/snapd/", kind: tar.TypeDir, mode: 0755},
+		archiveEntry{name: "./var/lib/snapd/void/", kind: tar.TypeDir, mode: 0111},
+		archiveEntry{name: "./var/lib/snapd/void/state", kind: tar.TypeReg, mode: 0000, body: []byte("unchanged")},
+	)
+}
+
+func restrictiveNestedDirectoriesArchive(t *testing.T) []byte {
+	return makeArchive(t,
+		archiveEntry{name: "./", kind: tar.TypeDir, mode: 0755},
+		archiveEntry{name: "./private/", kind: tar.TypeDir, mode: 0000},
+		archiveEntry{name: "./private/nested/", kind: tar.TypeDir, mode: 0000},
+	)
+}
+
 const testReleaseURL = "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/rootfs.tar.gz"
 
 func archiveRelease(t *testing.T, body []byte) managedRelease {
@@ -153,28 +171,16 @@ func archiveRelease(t *testing.T, body []byte) managedRelease {
 		ArchiveName:   "synthetic-rootfs.tar.gz",
 		URL:           testReleaseURL,
 		ArchiveSHA256: hex.EncodeToString(digest[:]),
-		TreeSHA256:    archiveTreeDigest(t, body),
 	}
 }
 
-func archiveTreeDigest(t *testing.T, body []byte) string {
-	t.Helper()
-	archivePath := filepath.Join(t.TempDir(), "archive.tar.gz")
-	root := filepath.Join(t.TempDir(), "rootfs")
-	if err := os.WriteFile(archivePath, body, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(root, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := extractArchive(archivePath, root, defaultRootfsLimits); err != nil {
-		t.Fatalf("extract synthetic archive: %v", err)
-	}
-	digest, err := treeDigest(root)
-	if err != nil {
-		t.Fatalf("hash synthetic archive: %v", err)
-	}
-	return digest
+func extractArchiveForTest(archivePath, destination string, limits rootfsLimits) error {
+	_, err := extractArchive(archivePath, destination, limits)
+	return err
+}
+
+func validatePublishedRootfsForTest(root string, source managedSource, release managedRelease) error {
+	return validatePublishedRootfs(root, source, release, defaultRootfsLimits)
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -217,14 +223,13 @@ func testProvisioner(t *testing.T, body []byte, status int, requests *atomic.Int
 	}
 }
 
-func testRemoteSource(t *testing.T, body []byte, treeSHA256 string) RemoteSource {
+func testRemoteSource(t *testing.T, body []byte) RemoteSource {
 	t.Helper()
 	digest := sha256.Sum256(body)
 	return RemoteSource{
 		URL:           "https://mirror.example/rootfs.tar.gz",
 		Architecture:  runtime.GOARCH,
 		ArchiveSHA256: hex.EncodeToString(digest[:]),
-		TreeSHA256:    treeSHA256,
 	}
 }
 
@@ -251,7 +256,6 @@ func remoteCachePath(t *testing.T, p *Provisioner, remote RemoteSource) string {
 		ArchiveName:   "rootfs.tar.gz",
 		URL:           remote.URL,
 		ArchiveSHA256: remote.ArchiveSHA256,
-		TreeSHA256:    remote.TreeSHA256,
 	}
 	target, err := cachePath(p.CacheDir, source, release)
 	if err != nil {
@@ -298,7 +302,7 @@ func TestProvisionAndReuseOffline(t *testing.T) {
 	if requests.Load() != 1 {
 		t.Fatalf("request count = %d, want 1", requests.Load())
 	}
-	if err := validatePublishedRootfs(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err != nil {
+	if err := validatePublishedRootfsForTest(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err != nil {
 		t.Fatalf("published rootfs is invalid: %v", err)
 	}
 	if got, err := p.Resolve(""); err != nil || got != target {
@@ -309,9 +313,86 @@ func TestProvisionAndReuseOffline(t *testing.T) {
 	}
 }
 
+func TestRestrictiveRootfsPermissionsSurviveProvisionAndReuse(t *testing.T) {
+	body := restrictiveArchive(t)
+	var requests atomic.Int32
+	p := testProvisioner(t, body, http.StatusOK, &requests)
+	target, err := p.Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(target, "var/lib/snapd/void"), 0700)
+	})
+	checkModes := func() {
+		t.Helper()
+		void, err := os.Stat(filepath.Join(target, "var/lib/snapd/void"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if void.Mode().Perm() != 0111 {
+			t.Fatalf("void mode = %#o, want 0111", void.Mode().Perm())
+		}
+		state, err := os.Stat(filepath.Join(target, "var/lib/snapd/void/state"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Mode().Perm() != 0000 {
+			t.Fatalf("state mode = %#o, want 0000", state.Mode().Perm())
+		}
+	}
+	checkModes()
+	p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("offline")
+	})
+	if got, err := p.Resolve(""); err != nil || got != target {
+		t.Fatalf("offline reuse = %q, %v; want %q, nil", got, err, target)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("offline reuse made %d requests, want 1", requests.Load())
+	}
+	checkModes()
+}
+
+func TestRestrictiveDirectoryModesApplyDeepestFirst(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "archive.tar.gz")
+	if err := os.WriteFile(archivePath, restrictiveNestedDirectoriesArchive(t), 0600); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "rootfs")
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractArchive(archivePath, destination, defaultRootfsLimits); err != nil {
+		t.Fatalf("extractArchive() error = %v", err)
+	}
+	private := filepath.Join(destination, "private")
+	nested := filepath.Join(private, "nested")
+	privateInfo, err := os.Lstat(private)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if privateInfo.Mode().Perm() != 0000 {
+		t.Fatalf("private mode = %#o, want 0000", privateInfo.Mode().Perm())
+	}
+	if err := os.Chmod(private, 0700); err != nil {
+		t.Fatal(err)
+	}
+	nestedInfo, err := os.Lstat(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nestedInfo.Mode().Perm() != 0000 {
+		t.Fatalf("nested mode = %#o, want 0000", nestedInfo.Mode().Perm())
+	}
+	if err := os.Chmod(nested, 0700); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRemoteRootfsProvisionAndOfflineReuse(t *testing.T) {
 	body := minimalArchive(t)
-	remote := testRemoteSource(t, body, "")
+	remote := testRemoteSource(t, body)
 	var requests atomic.Int32
 	p := testRemoteProvisioner(t, body, remote, &requests)
 	target, err := p.ResolveRemote(remote)
@@ -332,7 +413,7 @@ func TestRemoteRootfsProvisionAndOfflineReuse(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Provider != "remote" || got.Version != "v1" || got.SHA256 != remote.ArchiveSHA256 || got.TreeSHA256 == "" {
+	if got.Provider != "remote" || got.Version != "v1" || got.SHA256 != remote.ArchiveSHA256 {
 		t.Fatalf("remote manifest = %+v, want verified remote metadata", got)
 	}
 
@@ -390,9 +471,10 @@ func TestRemoteRootfsRejectsInvalidMetadataBeforeCacheOrNetwork(t *testing.T) {
 	}
 }
 
-func TestRemoteRootfsRejectsArchiveAndTreeMismatches(t *testing.T) {
+func TestRemoteRootfsRejectsArchiveMismatch(t *testing.T) {
 	body := minimalArchive(t)
-	remote := testRemoteSource(t, body, strings.Repeat("0", 64))
+	remote := testRemoteSource(t, body)
+	remote.ArchiveSHA256 = strings.Repeat("0", 64)
 	p := testRemoteProvisioner(t, body, remote, nil)
 	if _, err := p.ResolveRemote(remote); err == nil || !strings.Contains(err.Error(), "SHA-256 mismatch") {
 		t.Fatalf("archive mismatch error = %v", err)
@@ -401,37 +483,6 @@ func TestRemoteRootfsRejectsArchiveAndTreeMismatches(t *testing.T) {
 		t.Fatalf("archive mismatch left published cache: %v", err)
 	}
 
-	digest := sha256.Sum256(body)
-	remote = testRemoteSource(t, body, strings.Repeat("f", 64))
-	remote.ArchiveSHA256 = hex.EncodeToString(digest[:])
-	p = testRemoteProvisioner(t, body, remote, nil)
-	if _, err := p.ResolveRemote(remote); err == nil || !strings.Contains(err.Error(), "tree SHA-256 mismatch") {
-		t.Fatalf("tree mismatch error = %v", err)
-	}
-	if _, err := os.Stat(remoteCachePath(t, p, remote)); !os.IsNotExist(err) {
-		t.Fatalf("tree mismatch left published cache: %v", err)
-	}
-}
-
-func TestRemoteRootfsCacheModificationIsDetected(t *testing.T) {
-	body := minimalArchive(t)
-	remote := testRemoteSource(t, body, "")
-	var requests atomic.Int32
-	p := testRemoteProvisioner(t, body, remote, &requests)
-	target, err := p.ResolveRemote(remote)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(target, "bin", "busybox"), []byte("modified"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
-		requests.Add(1)
-		return nil, errors.New("offline")
-	})
-	if _, err := p.ResolveRemote(remote); err == nil || !strings.Contains(err.Error(), "offline") {
-		t.Fatalf("modified remote cache was accepted: %v", err)
-	}
 }
 
 func TestSelectedManagedSourceControlsCacheAndManifest(t *testing.T) {
@@ -455,8 +506,10 @@ func TestSelectedManagedSourceControlsCacheAndManifest(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
-	if want := manifestFor(source, release); !reflect.DeepEqual(got, want) {
-		t.Fatalf("manifest = %#v, want %#v", got, want)
+	if got.SchemaVersion != manifestSchemaVersion || got.Provider != source.Provider || got.Version != source.Version ||
+		got.Architecture != release.Architecture || got.Archive != release.ArchiveName || got.SHA256 != release.ArchiveSHA256 ||
+		got.ExtractedBytes == 0 || got.LargestFileBytes == 0 || got.Entries == 0 {
+		t.Fatalf("manifest = %#v, want current archive identity and statistics", got)
 	}
 }
 
@@ -472,7 +525,6 @@ func TestInvalidManagedMetadataDoesNotTouchCacheOrNetwork(t *testing.T) {
 		{name: "empty cache key", update: func(_ *managedSource, release *managedRelease) { release.CacheKey = "" }},
 		{name: "traversal archive name", update: func(_ *managedSource, release *managedRelease) { release.ArchiveName = "../archive" }},
 		{name: "invalid archive digest", update: func(_ *managedSource, release *managedRelease) { release.ArchiveSHA256 = strings.Repeat("0", 63) }},
-		{name: "invalid tree digest", update: func(_ *managedSource, release *managedRelease) { release.TreeSHA256 = strings.Repeat("g", 64) }},
 		{name: "invalid URL", update: func(_ *managedSource, release *managedRelease) { release.URL = "http://example.test/rootfs.tar.gz" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -834,7 +886,7 @@ func TestSecureExtraction(t *testing.T) {
 			if err := os.Mkdir(destination, 0700); err != nil {
 				t.Fatal(err)
 			}
-			err := extractArchive(archivePath, destination, limits)
+			err := extractArchiveForTest(archivePath, destination, limits)
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("extractArchive() error = %v, want %q", err, tt.want)
 			}
@@ -884,7 +936,7 @@ func TestExtractionRejectsRootMarkerWithTheWrongType(t *testing.T) {
 	if err := os.Mkdir(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractArchive(archivePath, root, defaultRootfsLimits); err == nil || !strings.Contains(err.Error(), "root marker") {
+	if err := extractArchiveForTest(archivePath, root, defaultRootfsLimits); err == nil || !strings.Contains(err.Error(), "root marker") {
 		t.Fatalf("extractArchive() error = %v, want root-marker error", err)
 	}
 }
@@ -899,7 +951,7 @@ func TestSecureExtractionAllowsInternalLinksAndStripsSpecialBits(t *testing.T) {
 	if err := os.Mkdir(destination, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractArchive(archivePath, destination, defaultRootfsLimits); err != nil {
+	if err := extractArchiveForTest(archivePath, destination, defaultRootfsLimits); err != nil {
 		t.Fatalf("extractArchive() error = %v", err)
 	}
 	info, err := os.Stat(filepath.Join(destination, "bin", "busybox"))
@@ -916,9 +968,32 @@ func TestCorruptArchiveIsRejected(t *testing.T) {
 	if err := os.WriteFile(archivePath, []byte("not gzip"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	err := extractArchive(archivePath, filepath.Join(t.TempDir(), "rootfs"), defaultRootfsLimits)
+	err := extractArchiveForTest(archivePath, filepath.Join(t.TempDir(), "rootfs"), defaultRootfsLimits)
 	if err == nil || !strings.Contains(err.Error(), "identify") {
 		t.Fatalf("extractArchive() error = %v, want archive-identification error", err)
+	}
+}
+
+func TestExtractionReportsStatistics(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "archive.tar.gz")
+	archive := makeArchive(t,
+		archiveEntry{name: "./", kind: tar.TypeDir, mode: 0755},
+		archiveEntry{name: "one", kind: tar.TypeReg, mode: 0600, body: []byte("123")},
+		archiveEntry{name: "two", kind: tar.TypeReg, mode: 0600, body: []byte("12345")},
+	)
+	if err := os.WriteFile(archivePath, archive, 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "rootfs")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := extractArchive(archivePath, root, defaultRootfsLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.TotalBytes != 8 || stats.LargestFileBytes != 5 || stats.Entries != 3 {
+		t.Fatalf("extraction stats = %+v, want total=8 largest=5 entries=3", stats)
 	}
 }
 
@@ -940,7 +1015,6 @@ func TestExtractRecognizedArchiveFormats(t *testing.T) {
 		{name: "zip", body: makeZipArchive(t, entries...)},
 	}
 
-	var want string
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			archivePath := filepath.Join(t.TempDir(), "input")
@@ -951,17 +1025,8 @@ func TestExtractRecognizedArchiveFormats(t *testing.T) {
 			if err := os.Mkdir(root, 0700); err != nil {
 				t.Fatal(err)
 			}
-			if err := extractArchive(archivePath, root, defaultRootfsLimits); err != nil {
+			if err := extractArchiveForTest(archivePath, root, defaultRootfsLimits); err != nil {
 				t.Fatalf("extractArchive() error = %v", err)
-			}
-			got, err := treeDigest(root)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if want == "" {
-				want = got
-			} else if got != want {
-				t.Fatalf("tree digest = %s, want %s", got, want)
 			}
 		})
 	}
@@ -974,7 +1039,7 @@ func TestExtractRecognizedArchiveFormats(t *testing.T) {
 	if err := os.Mkdir(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractArchive(archivePath, root, defaultRootfsLimits); err == nil {
+	if err := extractArchiveForTest(archivePath, root, defaultRootfsLimits); err == nil {
 		t.Fatal("extractArchive() accepted an unrecognized stream")
 	}
 }
@@ -996,7 +1061,7 @@ func TestManifestValidationRejectsUnexpectedFields(t *testing.T) {
 	if err := os.WriteFile(manifestPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePublishedRootfs(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err == nil {
+	if err := validatePublishedRootfsForTest(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err == nil {
 		t.Fatal("validatePublishedRootfs() accepted unexpected manifest field")
 	}
 }
@@ -1011,27 +1076,8 @@ func TestManifestValidationIsBounded(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(target, manifestName), bytes.Repeat([]byte("x"), maxManifestBytes+1), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := validatePublishedRootfs(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err == nil || !strings.Contains(err.Error(), "manifest exceeds") {
+	if err := validatePublishedRootfsForTest(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err == nil || !strings.Contains(err.Error(), "manifest exceeds") {
 		t.Fatalf("validatePublishedRootfs() error = %v, want bounded manifest error", err)
-	}
-}
-
-func TestTreeDigestEnforcesEntryLimit(t *testing.T) {
-	root := t.TempDir()
-	for _, name := range []string{"one", "two"} {
-		if err := os.WriteFile(filepath.Join(root, name), []byte(name), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	fd, err := openDirectoryPath(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(fd)
-	limits := defaultRootfsLimits
-	limits.MaxEntries = 1
-	if _, err := treeDigestFDWithLimits(fd, limits); err == nil || !strings.Contains(err.Error(), "entry limit") {
-		t.Fatalf("treeDigestFDWithLimits() error = %v, want entry limit", err)
 	}
 }
 
@@ -1039,6 +1085,26 @@ func TestRemoveTreeAtUsesBoundedBatches(t *testing.T) {
 	parent := t.TempDir()
 	target := filepath.Join(parent, "tree")
 	if err := os.Mkdir(target, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for name, mode := range map[string]os.FileMode{"zero": 0000, "execute": 0111} {
+		directory := filepath.Join(target, name)
+		if err := os.Mkdir(directory, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, "file"), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(directory, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	external := t.TempDir()
+	marker := filepath.Join(external, "marker")
+	if err := os.WriteFile(marker, []byte("unchanged"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(target, "external")); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < cleanupDirectoryBatch*2+1; i++ {
@@ -1058,65 +1124,8 @@ func TestRemoveTreeAtUsesBoundedBatches(t *testing.T) {
 	if _, err := os.Lstat(target); !os.IsNotExist(err) {
 		t.Fatalf("removeTreeAt() left tree: %v", err)
 	}
-}
-
-func TestModifiedCachedTreeIsRejectedAndPreservedOffline(t *testing.T) {
-	tests := []struct {
-		name   string
-		modify func(t *testing.T, target string)
-	}{
-		{name: "file contents", modify: func(t *testing.T, target string) {
-			if err := os.WriteFile(filepath.Join(target, "bin", "busybox"), []byte("modified"), 0755); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{name: "file mode", modify: func(t *testing.T, target string) {
-			if err := os.Chmod(filepath.Join(target, "bin", "busybox"), 0700); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{name: "symlink target", modify: func(t *testing.T, target string) {
-			name := filepath.Join(target, "bin", "sh")
-			if err := os.Remove(name); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Symlink("echo", name); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{name: "added file", modify: func(t *testing.T, target string) {
-			if err := os.WriteFile(filepath.Join(target, "bin", "added"), []byte("added"), 0644); err != nil {
-				t.Fatal(err)
-			}
-		}},
-		{name: "removed file", modify: func(t *testing.T, target string) {
-			if err := os.Remove(filepath.Join(target, "bin", "echo")); err != nil {
-				t.Fatal(err)
-			}
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			body := minimalArchive(t)
-			p := testProvisioner(t, body, http.StatusOK, nil)
-			target, err := p.Resolve("")
-			if err != nil {
-				t.Fatal(err)
-			}
-			tt.modify(t, target)
-			if err := validatePublishedRootfs(target, p.sourceForProvisioning(), p.sourceForProvisioning().Releases[runtime.GOARCH]); err == nil {
-				t.Fatal("validatePublishedRootfs() accepted a modified tree")
-			}
-			p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
-				return nil, errors.New("offline")
-			})
-			if _, err := p.Resolve(""); err == nil {
-				t.Fatal("offline Resolve() accepted a modified tree")
-			}
-			if _, err := os.Lstat(target); err != nil {
-				t.Fatalf("offline repair removed the invalid fallback: %v", err)
-			}
-		})
+	if got, err := os.ReadFile(marker); err != nil || string(got) != "unchanged" {
+		t.Fatalf("cleanup followed external symlink: err=%v data=%q", err, got)
 	}
 }
 
@@ -1265,26 +1274,23 @@ func TestReleaseMetadataIsPinned(t *testing.T) {
 		cacheKey   string
 		archive    string
 		sha256     string
-		treeSHA256 string
 	}{
 		"amd64": {
 			alpineArch: "x86_64",
 			cacheKey:   "x86_64",
 			archive:    "alpine-minirootfs-3.24.1-x86_64.tar.gz",
 			sha256:     "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
-			treeSHA256: "f35a4d7394df512b1727eebe935f54cc38a4b15154e56ad74722cb3683c4eb9f",
 		},
 		"arm64": {
 			alpineArch: "aarch64",
 			cacheKey:   "aarch64",
 			archive:    "alpine-minirootfs-3.24.1-aarch64.tar.gz",
 			sha256:     "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
-			treeSHA256: "d685f267ee308d816da007134d44d1e661b4a69ca81ede67b19381eeb25dbb66",
 		},
 	}
 	for goArch, expected := range want {
 		release, ok := defaultManagedSource.Releases[goArch]
-		if !ok || release.Architecture != expected.alpineArch || release.CacheKey != expected.cacheKey || release.ArchiveName != expected.archive || release.ArchiveSHA256 != expected.sha256 || release.TreeSHA256 != expected.treeSHA256 {
+		if !ok || release.Architecture != expected.alpineArch || release.CacheKey != expected.cacheKey || release.ArchiveName != expected.archive || release.ArchiveSHA256 != expected.sha256 {
 			t.Errorf("defaultManagedSource.Releases[%q] = %+v, want %+v", goArch, release, expected)
 		}
 	}

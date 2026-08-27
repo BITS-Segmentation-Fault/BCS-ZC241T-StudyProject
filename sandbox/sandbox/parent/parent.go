@@ -37,7 +37,6 @@ func Parent(cfg config.Config) (result int) {
 			URL:           cfg.RemoteRootFS.URL,
 			Architecture:  cfg.RemoteRootFS.Architecture,
 			ArchiveSHA256: cfg.RemoteRootFS.ArchiveSHA256,
-			TreeSHA256:    cfg.RemoteRootFS.TreeSHA256,
 		}
 		resolvedRootFS, err = provisioner.ResolveRemote(remote)
 	} else {

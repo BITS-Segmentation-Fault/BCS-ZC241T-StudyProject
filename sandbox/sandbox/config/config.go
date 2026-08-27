@@ -34,7 +34,6 @@ type RemoteRootFS struct {
 	URL           string `yaml:"url" json:"url"`
 	Architecture  string `yaml:"architecture" json:"architecture"`
 	ArchiveSHA256 string `yaml:"archive_sha256" json:"archive_sha256"`
-	TreeSHA256    string `yaml:"tree_sha256,omitempty" json:"tree_sha256,omitempty"`
 }
 
 type Config struct {
@@ -225,16 +224,13 @@ func validateRemoteRootFS(remote RemoteRootFS) error {
 	if remote.Architecture != runtime.GOARCH {
 		return fmt.Errorf("value_error: remote_rootfs.architecture %q does not match runtime architecture %q", remote.Architecture, runtime.GOARCH)
 	}
-	if err := validateRemoteDigest("archive_sha256", remote.ArchiveSHA256, true); err != nil {
+	if err := validateRemoteDigest("archive_sha256", remote.ArchiveSHA256); err != nil {
 		return err
 	}
-	return validateRemoteDigest("tree_sha256", remote.TreeSHA256, false)
+	return nil
 }
 
-func validateRemoteDigest(name, value string, required bool) error {
-	if value == "" && !required {
-		return nil
-	}
+func validateRemoteDigest(name, value string) error {
 	if len(value) != sha256HexLength || value != strings.ToLower(value) {
 		return fmt.Errorf("value_error: remote_rootfs.%s must be 64 lowercase hexadecimal characters", name)
 	}

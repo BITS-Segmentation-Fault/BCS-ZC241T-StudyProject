@@ -78,20 +78,21 @@ remote_rootfs:
   url: https://example.com/rootfs-amd64.tar.gz
   architecture: amd64
   archive_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  # tree_sha256: optional pinned digest of the extracted tree
 ```
 
 The remote URL must be HTTPS and the archive SHA-256 is mandatory; it must be
-lowercase and exactly 64 hexadecimal characters. Remote archives are cached
-under their digest, never under their URL, and are extracted only after the
-downloaded bytes match that digest. The extracted tree is then hashed and
-verified on every reuse. Archive format is identified from content, so any
-unencrypted archive recognized by the pinned archive library may be used when
-its entries form a valid rootfs tree. Compressed files that are not archives
-and unsafe entry types are rejected, and archive metadata is not restored. Remote
-rootfs launches must keep
-`read_only_root: true`; local and remote rootfs sources cannot be combined. A failed remote
-download never falls back to the built-in Alpine rootfs.
+lowercase and exactly 64 hexadecimal characters. The archive SHA-256
+authenticates the downloaded bytes. Remote archives are cached under their
+digest, never under their URL, and are extracted only after the
+downloaded bytes match that digest. Archive format is identified from content,
+so any unencrypted archive recognized by the pinned archive library may be used
+when its entries form a valid rootfs tree. Compressed files that are not
+archives and unsafe entry types are rejected, and archive metadata is not
+restored. Remote rootfs launches must keep `read_only_root: true`; local and
+remote rootfs sources cannot be combined. A failed remote download never falls
+back to the built-in Alpine rootfs. The extracted cache is
+owned by the user and trusted rather than rehashed on reuse; remove its matching
+cache entry to repair a locally modified cache.
 
 When a configuration is loaded from a YAML file, a non-empty relative
 `rootfs_source` and each non-empty relative `bind_mounts[].host_path` are
@@ -102,7 +103,7 @@ filename context, so it continues to require absolute host paths.
 
 The namespace-free archive maintenance check can be run with
 `SANDBOX_ALPINE_MAINTENANCE=1`; it downloads both pinned archives, verifies
-their archive digests, securely extracts them, and verifies their tree digests.
+their archive digests, and securely extracts them.
 The managed-rootfs E2E check can be enabled with
 `SANDBOX_MANAGED_ROOTFS_E2E=1`; it uses a fresh temporary `XDG_CACHE_HOME`,
 then repeats the launch with unusable proxy settings to verify offline reuse.

@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"sort"
 	"strings"
 
 	"github.com/mholt/archives"
@@ -23,6 +24,12 @@ type rootfsLimits struct {
 	MaxEntries    int
 }
 
+type extractionStats struct {
+	TotalBytes       int64
+	LargestFileBytes int64
+	Entries          int
+}
+
 // defaultRootfsLimits is the shared resource-exhaustion policy for trees.
 var defaultRootfsLimits = rootfsLimits{
 	MaxTotalBytes: 512 << 20,
@@ -30,25 +37,26 @@ var defaultRootfsLimits = rootfsLimits{
 	MaxEntries:    100000,
 }
 
-func extractArchive(archivePath, destination string, limits rootfsLimits) error {
+func extractArchive(archivePath, destination string, limits rootfsLimits) (extractionStats, error) {
 	archive, err := os.Open(archivePath)
 	if err != nil {
-		return fmt.Errorf("cannot open rootfs archive: %w", err)
+		return extractionStats{}, fmt.Errorf("cannot open rootfs archive: %w", err)
 	}
 	defer archive.Close()
 
 	format, stream, err := archives.Identify(context.Background(), "", archive)
 	if err != nil {
-		return fmt.Errorf("cannot identify rootfs archive: %w", err)
+		return extractionStats{}, fmt.Errorf("cannot identify rootfs archive: %w", err)
 	}
 	extractor, ok := format.(archives.Extractor)
 	if !ok {
-		return fmt.Errorf("rootfs input is a recognized compressed file, not an archive")
+		return extractionStats{}, fmt.Errorf("rootfs input is a recognized compressed file, not an archive")
 	}
 
 	entries := make(map[string]byte)
 	directoryModes := make(map[string]fs.FileMode)
 	var extractedBytes int64
+	var largestFileBytes int64
 	entryCount := 0
 	err = extractor.Extract(context.Background(), stream, func(_ context.Context, file archives.FileInfo) error {
 		entryCount++
@@ -86,6 +94,9 @@ func extractArchive(archivePath, destination string, limits rootfsLimits) error 
 			if err := extractRegularFile(destination, name, file, limits, &extractedBytes); err != nil {
 				return err
 			}
+			if file.Size() > largestFileBytes {
+				largestFileBytes = file.Size()
+			}
 		case tar.TypeSymlink:
 			if err := validateInternalTarget(name, file.LinkTarget); err != nil {
 				return err
@@ -104,15 +115,28 @@ func extractArchive(archivePath, destination string, limits rootfsLimits) error 
 		return nil
 	})
 	if err != nil {
-		return fmt.Errorf("cannot extract rootfs archive: %w", err)
+		return extractionStats{}, fmt.Errorf("cannot extract rootfs archive: %w", err)
 	}
 
-	for name, mode := range directoryModes {
+	directoryNames := make([]string, 0, len(directoryModes))
+	for name := range directoryModes {
+		directoryNames = append(directoryNames, name)
+	}
+	sort.Slice(directoryNames, func(i, j int) bool {
+		depth := func(name string) int { return strings.Count(name, "/") + 1 }
+		leftDepth, rightDepth := depth(directoryNames[i]), depth(directoryNames[j])
+		if leftDepth != rightDepth {
+			return leftDepth > rightDepth
+		}
+		return directoryNames[i] < directoryNames[j]
+	})
+	for _, name := range directoryNames {
+		mode := directoryModes[name]
 		if err := os.Chmod(filepathJoin(destination, name), mode.Perm()); err != nil {
-			return fmt.Errorf("cannot apply mode to rootfs directory %q: %w", name, err)
+			return extractionStats{}, fmt.Errorf("cannot apply mode to rootfs directory %q: %w", name, err)
 		}
 	}
-	return nil
+	return extractionStats{TotalBytes: extractedBytes, LargestFileBytes: largestFileBytes, Entries: entryCount}, nil
 }
 
 func archiveEntryKind(file archives.FileInfo) (byte, error) {

@@ -21,7 +21,6 @@ func TestConfigSnapshotRoundTrip(t *testing.T) {
 		URL:           "https://mirror.example/rootfs.tar.gz",
 		Architecture:  runtime.GOARCH,
 		ArchiveSHA256: strings.Repeat("a", 64),
-		TreeSHA256:    strings.Repeat("b", 64),
 	}
 	cfg.FileSizeLimitMB = 4
 	done := make(chan error, 1)

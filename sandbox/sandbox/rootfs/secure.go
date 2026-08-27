@@ -3,7 +3,9 @@
 package rootfs
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -153,7 +155,36 @@ func syncDirectory(fd int, name string) error {
 }
 
 func removeTreeAt(parentFD int, name string) error {
-	entry, err := openEntryAt(parentFD, name)
+	return removeTreeAtInternal(parentFD, name, false)
+}
+
+// removeManagedTreeAt is used only after the managed cache hierarchy has been
+// opened and ownership-checked. That permits the compatibility fallback for
+// kernels without fchmodat2 while keeping arbitrary callers descriptor-only.
+func removeManagedTreeAt(parentFD int, name string) error {
+	return removeTreeAtInternal(parentFD, name, true)
+}
+
+type cleanupEntry struct {
+	fd   int
+	stat unix.Stat_t
+}
+
+func openCleanupEntry(parentFD int, name string) (cleanupEntry, error) {
+	fd, err := unix.Openat(parentFD, name, unix.O_PATH|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return cleanupEntry{}, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		_ = unix.Close(fd)
+		return cleanupEntry{}, err
+	}
+	return cleanupEntry{fd: fd, stat: stat}, nil
+}
+
+func removeTreeAtInternal(parentFD int, name string, allowPathFallback bool) error {
+	entry, err := openCleanupEntry(parentFD, name)
 	if err != nil {
 		if err == unix.ENOENT {
 			return nil
@@ -162,26 +193,107 @@ func removeTreeAt(parentFD int, name string) error {
 	}
 	if entry.stat.Mode&unix.S_IFMT == unix.S_IFDIR {
 		defer unix.Close(entry.fd)
-		for {
-			if _, err := unix.Seek(entry.fd, 0, 0); err != nil {
+		if entry.stat.Uid != uint32(os.Getuid()) {
+			return fmt.Errorf("cannot remove directory %q owned by another user", name)
+		}
+		if entry.stat.Mode&0700 != 0700 {
+			if err := makeCleanupDirectoryTraversable(parentFD, name, entry, allowPathFallback); err != nil {
 				return err
 			}
-			names, readErr := readDirectoryBatch(entry.fd)
+		}
+		readFD, err := openCleanupDirectory(entry)
+		if err != nil {
+			return err
+		}
+		readDirectory := os.NewFile(uintptr(readFD), "rootfs-cleanup-directory")
+		if readDirectory == nil {
+			_ = unix.Close(readFD)
+			return fmt.Errorf("cannot open rootfs cleanup directory")
+		}
+		defer readDirectory.Close()
+		for {
+			names, readErr := readDirectoryBatch(readDirectory)
 			if readErr != nil {
 				return readErr
 			}
 			if len(names) == 0 {
-				return unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR)
-			}
-			for _, child := range names {
-				if err := removeTreeAt(entry.fd, child); err != nil {
+				if err := unix.Unlinkat(parentFD, name, unix.AT_REMOVEDIR); err != nil {
 					return err
 				}
+				return nil
+			}
+			var removeErr error
+			for _, child := range names {
+				removeErr = errors.Join(removeErr, removeTreeAtInternal(readFD, child, allowPathFallback))
+			}
+			if removeErr != nil {
+				return removeErr
 			}
 		}
 	}
 	defer unix.Close(entry.fd)
 	return unix.Unlinkat(parentFD, name, 0)
+}
+
+func openCleanupDirectory(entry cleanupEntry) (int, error) {
+	readFD, err := unix.Openat(entry.fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return -1, err
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstat(readFD, &stat); err != nil {
+		_ = unix.Close(readFD)
+		return -1, err
+	}
+	if stat.Dev != entry.stat.Dev || stat.Ino != entry.stat.Ino ||
+		stat.Mode&unix.S_IFMT != unix.S_IFDIR || stat.Uid != entry.stat.Uid {
+		_ = unix.Close(readFD)
+		return -1, fmt.Errorf("directory changed while being opened for cleanup")
+	}
+	return readFD, nil
+}
+
+func makeCleanupDirectoryTraversable(parentFD int, name string, entry cleanupEntry, allowPathFallback bool) error {
+	mode := uint32(entry.stat.Mode & 07777)
+	mode |= 0700
+	if err := unix.Fchmodat(entry.fd, "", mode, unix.AT_EMPTY_PATH); err == nil {
+		return nil
+	} else if !isFchmodatUnavailable(err) {
+		return fmt.Errorf("cannot make directory %q traversable by descriptor: %w", name, err)
+	} else if !allowPathFallback {
+		return fmt.Errorf("cannot make directory %q traversable: descriptor-bound fchmodat2 unavailable", name)
+	}
+	if err := unix.Fchmodat(parentFD, name, mode, 0); err != nil {
+		return fmt.Errorf("cannot make directory %q traversable by parent-relative fallback: %w", name, err)
+	}
+	reopened, err := openCleanupEntry(parentFD, name)
+	if err != nil {
+		return fmt.Errorf("cannot verify directory %q after parent-relative chmod: %w", name, err)
+	}
+	defer unix.Close(reopened.fd)
+	if reopened.stat.Dev != entry.stat.Dev || reopened.stat.Ino != entry.stat.Ino ||
+		reopened.stat.Mode&unix.S_IFMT != unix.S_IFDIR || reopened.stat.Uid != entry.stat.Uid {
+		return fmt.Errorf("directory %q changed during parent-relative chmod", name)
+	}
+	return nil
+}
+
+func isFchmodatUnavailable(err error) bool {
+	return errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOTSUP)
+}
+
+const cleanupDirectoryBatch = 64
+
+func readDirectoryBatch(directory *os.File) ([]string, error) {
+	entries, err := directory.ReadDir(cleanupDirectoryBatch)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names, nil
 }
 
 func hasParentComponent(name string) bool {
