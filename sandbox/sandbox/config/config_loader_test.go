@@ -41,12 +41,12 @@ func TestLoadConfigRejectsBoundaries(t *testing.T) {
 }
 
 func TestLoadConfigRemoteRootFS(t *testing.T) {
-	input := "command: [/bin/echo]\nremote_rootfs:\n  url: https://mirror.example/rootfs.tar.gz\n  architecture: " + runtime.GOARCH + "\n  archive_sha256: " + strings.Repeat("a", 64) + "\n"
+	input := "command: [/bin/echo]\nremote_rootfs:\n  url: https://mirror.example/rootfs.tar.gz\n  architecture: " + runtime.GOARCH + "\n  archive_sha256: " + strings.Repeat("a", 64) + "\n  max_extracted_size_mb: 2048\n  max_file_size_mb: 256\n  max_entries: 7000\n"
 	c, err := LoadConfigFromReader(strings.NewReader(input))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.RemoteRootFS == nil || c.RemoteRootFS.URL != "https://mirror.example/rootfs.tar.gz" || c.RemoteRootFS.Architecture != runtime.GOARCH || c.RemoteRootFS.ArchiveSHA256 != strings.Repeat("a", 64) {
+	if c.RemoteRootFS == nil || c.RemoteRootFS.URL != "https://mirror.example/rootfs.tar.gz" || c.RemoteRootFS.Architecture != runtime.GOARCH || c.RemoteRootFS.ArchiveSHA256 != strings.Repeat("a", 64) || c.RemoteRootFS.MaxExtractedSizeMB != 2048 || c.RemoteRootFS.MaxFileSizeMB != 256 || c.RemoteRootFS.MaxEntries != 7000 {
 		t.Fatalf("remote rootfs was not loaded: %+v", c.RemoteRootFS)
 	}
 

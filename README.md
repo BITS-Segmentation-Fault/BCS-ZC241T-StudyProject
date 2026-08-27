@@ -78,6 +78,9 @@ remote_rootfs:
   url: https://example.com/rootfs-amd64.tar.gz
   architecture: amd64
   archive_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  # max_extracted_size_mb: 2048  # use for an Ubuntu-sized rootfs
+  # max_file_size_mb: 0
+  # max_entries: 0
 ```
 
 The remote URL must be HTTPS and the archive SHA-256 is mandatory; it must be
@@ -90,9 +93,12 @@ when its entries form a valid rootfs tree. Compressed files that are not
 archives and unsafe entry types are rejected, and archive metadata is not
 restored. Remote rootfs launches must keep `read_only_root: true`; local and
 remote rootfs sources cannot be combined. A failed remote download never falls
-back to the built-in Alpine rootfs. The extracted cache is
-owned by the user and trusted rather than rehashed on reuse; remove its matching
-cache entry to repair a locally modified cache.
+back to the built-in Alpine rootfs. Optional remote tree limits default to
+512 MiB total, 128 MiB per file, and
+100,000 entries; zero selects those defaults, and the active limits are
+reapplied when a cache is reused. The extracted cache is owned by the user and
+trusted rather than rehashed on reuse; remove its matching cache entry to
+repair a locally modified cache.
 
 When a configuration is loaded from a YAML file, a non-empty relative
 `rootfs_source` and each non-empty relative `bind_mounts[].host_path` are

@@ -31,9 +31,12 @@ type BindMount struct {
 }
 
 type RemoteRootFS struct {
-	URL           string `yaml:"url" json:"url"`
-	Architecture  string `yaml:"architecture" json:"architecture"`
-	ArchiveSHA256 string `yaml:"archive_sha256" json:"archive_sha256"`
+	URL                string `yaml:"url" json:"url"`
+	Architecture       string `yaml:"architecture" json:"architecture"`
+	ArchiveSHA256      string `yaml:"archive_sha256" json:"archive_sha256"`
+	MaxExtractedSizeMB int    `yaml:"max_extracted_size_mb,omitempty" json:"max_extracted_size_mb,omitempty"`
+	MaxFileSizeMB      int    `yaml:"max_file_size_mb,omitempty" json:"max_file_size_mb,omitempty"`
+	MaxEntries         int    `yaml:"max_entries,omitempty" json:"max_entries,omitempty"`
 }
 
 type Config struct {
@@ -226,6 +229,40 @@ func validateRemoteRootFS(remote RemoteRootFS) error {
 	}
 	if err := validateRemoteDigest("archive_sha256", remote.ArchiveSHA256); err != nil {
 		return err
+	}
+	return validateRemoteLimits(remote)
+}
+
+const (
+	defaultRemoteExtractedSizeMB = 512
+	defaultRemoteFileSizeMB      = 128
+	maxInt64                     = 1<<63 - 1
+	maxRemoteLimitMB             = maxInt64 / (1 << 20)
+)
+
+func validateRemoteLimits(remote RemoteRootFS) error {
+	for name, value := range map[string]int{
+		"max_extracted_size_mb": remote.MaxExtractedSizeMB,
+		"max_file_size_mb":      remote.MaxFileSizeMB,
+		"max_entries":           remote.MaxEntries,
+	} {
+		if value < 0 {
+			return fmt.Errorf("value_error: remote_rootfs.%s cannot be negative", name)
+		}
+	}
+	totalMB := remote.MaxExtractedSizeMB
+	if totalMB == 0 {
+		totalMB = defaultRemoteExtractedSizeMB
+	}
+	fileMB := remote.MaxFileSizeMB
+	if fileMB == 0 {
+		fileMB = defaultRemoteFileSizeMB
+	}
+	if int64(totalMB) > maxRemoteLimitMB || int64(fileMB) > maxRemoteLimitMB {
+		return errors.New("value_error: remote rootfs size limit overflows byte conversion")
+	}
+	if fileMB > totalMB {
+		return errors.New("value_error: remote_rootfs.max_file_size_mb cannot exceed max_extracted_size_mb")
 	}
 	return nil
 }

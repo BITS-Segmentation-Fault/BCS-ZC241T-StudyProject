@@ -34,9 +34,12 @@ func Parent(cfg config.Config) (result int) {
 	var err error
 	if cfg.RemoteRootFS != nil {
 		remote := rootfs.RemoteSource{
-			URL:           cfg.RemoteRootFS.URL,
-			Architecture:  cfg.RemoteRootFS.Architecture,
-			ArchiveSHA256: cfg.RemoteRootFS.ArchiveSHA256,
+			URL:                cfg.RemoteRootFS.URL,
+			Architecture:       cfg.RemoteRootFS.Architecture,
+			ArchiveSHA256:      cfg.RemoteRootFS.ArchiveSHA256,
+			MaxExtractedSizeMB: cfg.RemoteRootFS.MaxExtractedSizeMB,
+			MaxFileSizeMB:      cfg.RemoteRootFS.MaxFileSizeMB,
+			MaxEntries:         cfg.RemoteRootFS.MaxEntries,
 		}
 		resolvedRootFS, err = provisioner.ResolveRemote(remote)
 	} else {

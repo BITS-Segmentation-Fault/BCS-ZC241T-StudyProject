@@ -52,9 +52,12 @@ type managedRelease struct {
 // RemoteSource describes a user-supplied archive whose identity is pinned by
 // its archive digest.
 type RemoteSource struct {
-	URL           string
-	Architecture  string
-	ArchiveSHA256 string
+	URL                string
+	Architecture       string
+	ArchiveSHA256      string
+	MaxExtractedSizeMB int
+	MaxFileSizeMB      int
+	MaxEntries         int
 }
 
 var defaultManagedSource = managedSource{
@@ -145,7 +148,11 @@ func (p Provisioner) ResolveRemote(remote RemoteSource) (string, error) {
 	if err := validateManagedMetadata(managed, release); err != nil {
 		return "", err
 	}
-	return p.resolveManaged(managed, release, defaultRootfsLimits)
+	limits, err := remoteRootfsLimits(remote)
+	if err != nil {
+		return "", err
+	}
+	return p.resolveManaged(managed, release, limits)
 }
 
 func (p Provisioner) resolveManaged(managed managedSource, release managedRelease, limits rootfsLimits) (string, error) {
@@ -163,6 +170,43 @@ func (p Provisioner) resolveManaged(managed managedSource, release managedReleas
 		return "", err
 	}
 	return p.provision(cacheDir, target, managed, release, limits)
+}
+
+const (
+	defaultRemoteExtractedSizeMB = 512
+	defaultRemoteFileSizeMB      = 128
+	defaultRemoteEntries         = 100000
+	maxLimitBytes                = int64(1<<63 - 1)
+	maxLimitMB                   = maxLimitBytes / (1 << 20)
+)
+
+func remoteRootfsLimits(remote RemoteSource) (rootfsLimits, error) {
+	if remote.MaxExtractedSizeMB < 0 || remote.MaxFileSizeMB < 0 || remote.MaxEntries < 0 {
+		return rootfsLimits{}, fmt.Errorf("remote rootfs limits cannot be negative")
+	}
+	totalMB := remote.MaxExtractedSizeMB
+	if totalMB == 0 {
+		totalMB = defaultRemoteExtractedSizeMB
+	}
+	fileMB := remote.MaxFileSizeMB
+	if fileMB == 0 {
+		fileMB = defaultRemoteFileSizeMB
+	}
+	if int64(totalMB) > maxLimitMB || int64(fileMB) > maxLimitMB {
+		return rootfsLimits{}, fmt.Errorf("remote rootfs size limit overflows byte conversion")
+	}
+	if fileMB > totalMB {
+		return rootfsLimits{}, fmt.Errorf("remote rootfs file limit cannot exceed total limit")
+	}
+	entries := remote.MaxEntries
+	if entries == 0 {
+		entries = defaultRemoteEntries
+	}
+	return rootfsLimits{
+		MaxTotalBytes: int64(totalMB) * (1 << 20),
+		MaxFileBytes:  int64(fileMB) * (1 << 20),
+		MaxEntries:    entries,
+	}, nil
 }
 
 func validateManagedMetadata(source managedSource, release managedRelease) error {

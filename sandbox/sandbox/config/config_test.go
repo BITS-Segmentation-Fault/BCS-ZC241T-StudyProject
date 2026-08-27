@@ -180,6 +180,32 @@ func TestRootfsSourceModes(t *testing.T) {
 			remote.ArchiveSHA256 = strings.Repeat("A", 64)
 			c.RemoteRootFS = remote
 		}, want: "archive_sha256"},
+		{name: "negative extracted size", change: func(c *Config) {
+			remote := validRemoteRootFS()
+			remote.MaxExtractedSizeMB = -1
+			c.RemoteRootFS = remote
+		}, want: "max_extracted_size_mb"},
+		{name: "negative file size", change: func(c *Config) {
+			remote := validRemoteRootFS()
+			remote.MaxFileSizeMB = -1
+			c.RemoteRootFS = remote
+		}, want: "max_file_size_mb"},
+		{name: "negative entries", change: func(c *Config) {
+			remote := validRemoteRootFS()
+			remote.MaxEntries = -1
+			c.RemoteRootFS = remote
+		}, want: "max_entries"},
+		{name: "size overflow", change: func(c *Config) {
+			remote := validRemoteRootFS()
+			remote.MaxExtractedSizeMB = int(^uint(0) >> 1)
+			c.RemoteRootFS = remote
+		}, want: "overflows"},
+		{name: "file size exceeds total", change: func(c *Config) {
+			remote := validRemoteRootFS()
+			remote.MaxExtractedSizeMB = 1
+			remote.MaxFileSizeMB = 2
+			c.RemoteRootFS = remote
+		}, want: "cannot exceed"},
 		{name: "writable remote", change: func(c *Config) { c.ReadOnlyRoot = false; c.RemoteRootFS = validRemoteRootFS() }, want: "read_only_root"},
 	}
 	for _, tt := range tests {

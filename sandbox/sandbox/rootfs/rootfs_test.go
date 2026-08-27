@@ -432,6 +432,49 @@ func TestRemoteRootfsProvisionAndOfflineReuse(t *testing.T) {
 	}
 }
 
+func TestRemoteRootfsReuseRevalidatesRecordedLimits(t *testing.T) {
+	body := makeArchive(t, archiveEntry{
+		name: "payload", kind: tar.TypeReg, mode: 0600, body: bytes.Repeat([]byte("x"), 2<<20),
+	})
+	remote := testRemoteSource(t, body)
+	remote.MaxExtractedSizeMB = 4
+	remote.MaxFileSizeMB = 4
+	remote.MaxEntries = 10
+	var requests atomic.Int32
+	p := testRemoteProvisioner(t, body, remote, &requests)
+	target, err := p.ResolveRemote(remote)
+	if err != nil {
+		t.Fatalf("provision with loose limits = %v", err)
+	}
+
+	p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, errors.New("offline")
+	})
+	within := remote
+	within.MaxExtractedSizeMB = 3
+	within.MaxFileSizeMB = 3
+	if got, err := p.ResolveRemote(within); err != nil || got != target {
+		t.Fatalf("reuse with fitting recorded statistics = %q, %v; want %q, nil", got, err, target)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("fitting cached statistics made %d requests, want 1", requests.Load())
+	}
+
+	tooSmall := within
+	tooSmall.MaxExtractedSizeMB = 1
+	tooSmall.MaxFileSizeMB = 1
+	if _, err := p.ResolveRemote(tooSmall); err == nil || !strings.Contains(err.Error(), "offline") {
+		t.Fatalf("reuse with excessive recorded statistics = %v, want offline reprovision failure", err)
+	}
+	if requests.Load() != 2 {
+		t.Fatalf("excessive cached statistics made %d requests, want 2", requests.Load())
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Fatalf("existing cache was not preserved after failed reprovision: %v", err)
+	}
+}
+
 func TestRemoteRootfsRejectsInvalidMetadataBeforeCacheOrNetwork(t *testing.T) {
 	body := minimalArchive(t)
 	digest := sha256.Sum256(body)
@@ -1331,6 +1374,69 @@ func TestReleaseMetadataIsPinned(t *testing.T) {
 		if !ok || release.Architecture != expected.alpineArch || release.CacheKey != expected.cacheKey || release.ArchiveName != expected.archive || release.ArchiveSHA256 != expected.sha256 {
 			t.Errorf("defaultManagedSource.Releases[%q] = %+v, want %+v", goArch, release, expected)
 		}
+	}
+}
+
+func TestRemoteRootfsLimits(t *testing.T) {
+	defaults, err := remoteRootfsLimits(RemoteSource{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaults != (rootfsLimits{MaxTotalBytes: 512 << 20, MaxFileBytes: 128 << 20, MaxEntries: 100000}) {
+		t.Fatalf("default remote limits = %#v", defaults)
+	}
+	overridden, err := remoteRootfsLimits(RemoteSource{
+		MaxExtractedSizeMB: 2048,
+		MaxFileSizeMB:      256,
+		MaxEntries:         7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overridden != (rootfsLimits{MaxTotalBytes: 2048 << 20, MaxFileBytes: 256 << 20, MaxEntries: 7}) {
+		t.Fatalf("overridden remote limits = %#v", overridden)
+	}
+	for _, remote := range []RemoteSource{
+		{MaxExtractedSizeMB: -1},
+		{MaxFileSizeMB: -1},
+		{MaxEntries: -1},
+		{MaxExtractedSizeMB: int(^uint(0) >> 1)},
+		{MaxExtractedSizeMB: 1, MaxFileSizeMB: 2},
+	} {
+		if _, err := remoteRootfsLimits(remote); err == nil {
+			t.Errorf("remoteRootfsLimits(%+v) accepted invalid limits", remote)
+		}
+	}
+}
+
+func TestTreeLimitsCanBeRaisedForLargerRemoteRoots(t *testing.T) {
+	body := makeArchive(t,
+		archiveEntry{name: "one", kind: tar.TypeReg, mode: 0644, body: []byte("1")},
+		archiveEntry{name: "two", kind: tar.TypeReg, mode: 0644, body: []byte("2")},
+	)
+	archivePath := filepath.Join(t.TempDir(), "archive")
+	if err := os.WriteFile(archivePath, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	small := rootfsLimits{MaxTotalBytes: 1, MaxFileBytes: 1, MaxEntries: 10}
+	root := filepath.Join(t.TempDir(), "small")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := extractArchive(archivePath, root, small); err == nil {
+		t.Fatal("small tree limits accepted the archive")
+	}
+	large := rootfsLimits{MaxTotalBytes: 1 << 20, MaxFileBytes: 1 << 20, MaxEntries: 10}
+	root = filepath.Join(t.TempDir(), "large")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := extractArchive(archivePath, root, large)
+	if err != nil {
+		t.Fatalf("larger tree limits rejected the archive: %v", err)
+	}
+	if stats != (extractionStats{TotalBytes: 2, LargestFileBytes: 1, Entries: 2}) {
+		t.Fatalf("extraction stats = %#v", stats)
 	}
 }
 
