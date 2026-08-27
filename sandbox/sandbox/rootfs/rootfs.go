@@ -43,8 +43,18 @@ type managedSource struct {
 
 type managedRelease struct {
 	Architecture  string
+	CacheKey      string
 	ArchiveName   string
 	URL           string
+	ArchiveSHA256 string
+	TreeSHA256    string
+}
+
+// RemoteSource describes a user-supplied archive whose identity is pinned by
+// its archive digest.
+type RemoteSource struct {
+	URL           string
+	Architecture  string
 	ArchiveSHA256 string
 	TreeSHA256    string
 }
@@ -55,6 +65,7 @@ var defaultManagedSource = managedSource{
 	Releases: map[string]managedRelease{
 		"amd64": {
 			Architecture:  "x86_64",
+			CacheKey:      "x86_64",
 			ArchiveName:   "alpine-minirootfs-3.24.1-x86_64.tar.gz",
 			URL:           "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-minirootfs-3.24.1-x86_64.tar.gz",
 			ArchiveSHA256: "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
@@ -62,6 +73,7 @@ var defaultManagedSource = managedSource{
 		},
 		"arm64": {
 			Architecture:  "aarch64",
+			CacheKey:      "aarch64",
 			ArchiveName:   "alpine-minirootfs-3.24.1-aarch64.tar.gz",
 			URL:           "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/aarch64/alpine-minirootfs-3.24.1-aarch64.tar.gz",
 			ArchiveSHA256: "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
@@ -96,7 +108,10 @@ func cachePath(cacheDir string, source managedSource, release managedRelease) (s
 	if cacheDir == "" {
 		return "", fmt.Errorf("cache directory cannot be empty")
 	}
-	return filepath.Join(cacheDir, "bcs-zc241t-sandbox", "rootfs", source.Provider, source.Version, release.Architecture), nil
+	if release.CacheKey == "" {
+		return "", fmt.Errorf("managed rootfs cache key cannot be empty")
+	}
+	return filepath.Join(cacheDir, "bcs-zc241t-sandbox", "rootfs", source.Provider, source.Version, release.CacheKey), nil
 }
 
 // Resolve returns a validated explicit rootfs or the completed managed rootfs.
@@ -114,6 +129,32 @@ func (p Provisioner) Resolve(rootfsSource string) (string, error) {
 	if err := validateManagedMetadata(managed, release); err != nil {
 		return "", err
 	}
+	return p.resolveManaged(managed, release)
+}
+
+// ResolveRemote provisions or reuses a verified remote rootfs. The archive
+// digest is the cache identity, so changing mirrors does not duplicate it.
+func (p Provisioner) ResolveRemote(remote RemoteSource) (string, error) {
+	if remote.Architecture != runtime.GOARCH {
+		return "", fmt.Errorf("remote rootfs architecture %q does not match runtime architecture %q", remote.Architecture, runtime.GOARCH)
+	}
+	managed := managedSource{Provider: "remote", Version: "v1"}
+	release := managedRelease{
+		Architecture:  remote.Architecture,
+		CacheKey:      remote.ArchiveSHA256,
+		ArchiveName:   "rootfs.tar.gz",
+		URL:           remote.URL,
+		ArchiveSHA256: remote.ArchiveSHA256,
+		TreeSHA256:    remote.TreeSHA256,
+	}
+	managed.Releases = map[string]managedRelease{runtime.GOARCH: release}
+	if err := validateManagedMetadata(managed, release); err != nil {
+		return "", err
+	}
+	return p.resolveManaged(managed, release)
+}
+
+func (p Provisioner) resolveManaged(managed managedSource, release managedRelease) (string, error) {
 
 	cacheDir := p.CacheDir
 	if cacheDir == "" {
@@ -135,25 +176,33 @@ func validateManagedMetadata(source managedSource, release managedRelease) error
 		"provider":     source.Provider,
 		"version":      source.Version,
 		"architecture": release.Architecture,
+		"cache key":    release.CacheKey,
 		"archive name": release.ArchiveName,
 	} {
 		if value == "" || strings.ContainsRune(value, 0) || strings.Contains(value, "/") || value == "." || value == ".." {
 			return fmt.Errorf("managed rootfs %s must be a non-empty path component", name)
 		}
 	}
-	for name, value := range map[string]string{
-		"archive SHA-256": release.ArchiveSHA256,
-		"tree SHA-256":    release.TreeSHA256,
-	} {
-		if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
-			return fmt.Errorf("managed rootfs %s must be a canonical 32-byte hexadecimal digest", name)
-		}
-		if _, err := hex.DecodeString(value); err != nil {
-			return fmt.Errorf("managed rootfs %s must be a canonical 32-byte hexadecimal digest: %v", name, err)
+	if err := validateDigest("archive SHA-256", release.ArchiveSHA256); err != nil {
+		return err
+	}
+	if release.TreeSHA256 != "" {
+		if err := validateDigest("tree SHA-256", release.TreeSHA256); err != nil {
+			return err
 		}
 	}
 	if _, err := validateReleaseURL(release.URL); err != nil {
 		return fmt.Errorf("invalid managed rootfs release URL: %w", err)
+	}
+	return nil
+}
+
+func validateDigest(name, value string) error {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return fmt.Errorf("managed rootfs %s must be a canonical 32-byte hexadecimal digest", name)
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return fmt.Errorf("managed rootfs %s must be a canonical 32-byte hexadecimal digest: %v", name, err)
 	}
 	return nil
 }
@@ -173,7 +222,7 @@ func (p Provisioner) provision(cacheDir, target string, source managedSource, re
 		return "", p.provisionError(release, target, err)
 	}
 	defer unix.Close(versionFD)
-	target = filepath.Join(versionDir, release.Architecture)
+	target = filepath.Join(versionDir, release.CacheKey)
 
 	lock, err := acquireLockAt(versionFD)
 	if err != nil {
@@ -181,7 +230,7 @@ func (p Provisioner) provision(cacheDir, target string, source managedSource, re
 	}
 	defer lock.Close()
 
-	targetName := release.Architecture
+	targetName := release.CacheKey
 	if err := validatePublishedRootfsAt(versionFD, targetName, source, release); err == nil {
 		return target, nil
 	}
@@ -220,9 +269,10 @@ func (p Provisioner) provision(cacheDir, target string, source managedSource, re
 	if err != nil {
 		return "", p.provisionError(release, target, fmt.Errorf("cannot hash extracted rootfs: %v", err))
 	}
-	if release.TreeSHA256 == "" || treeHash != release.TreeSHA256 {
+	if release.TreeSHA256 != "" && treeHash != release.TreeSHA256 {
 		return "", p.provisionError(release, target, fmt.Errorf("extracted rootfs tree SHA-256 mismatch: got %s, want %s", treeHash, release.TreeSHA256))
 	}
+	release.TreeSHA256 = treeHash
 	if err := writeManifest(extracted, source, release); err != nil {
 		return "", p.provisionError(release, target, err)
 	}
@@ -478,15 +528,24 @@ func validatePublishedRootfsFD(rootFD int, source managedSource, release managed
 		}
 		return err
 	}
-	if got != manifestFor(source, release) {
+	expected := manifestFor(source, release)
+	if got.Provider != expected.Provider || got.Version != expected.Version ||
+		got.Architecture != expected.Architecture || got.Archive != expected.Archive ||
+		got.SHA256 != expected.SHA256 {
+		return fmt.Errorf("rootfs manifest does not match pinned release")
+	}
+	if err := validateDigest("manifest tree SHA-256", got.TreeSHA256); err != nil {
+		return err
+	}
+	if release.TreeSHA256 != "" && got.TreeSHA256 != release.TreeSHA256 {
 		return fmt.Errorf("rootfs manifest does not match pinned release")
 	}
 	gotTree, err := treeDigestFD(rootFD)
 	if err != nil {
 		return fmt.Errorf("cannot verify published rootfs tree: %v", err)
 	}
-	if release.TreeSHA256 == "" || gotTree != release.TreeSHA256 {
-		return fmt.Errorf("published rootfs tree SHA-256 mismatch: got %s, want %s", gotTree, release.TreeSHA256)
+	if gotTree != got.TreeSHA256 {
+		return fmt.Errorf("published rootfs tree SHA-256 mismatch: got %s, want %s", gotTree, got.TreeSHA256)
 	}
 	return nil
 }

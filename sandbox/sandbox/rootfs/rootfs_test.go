@@ -92,6 +92,7 @@ func archiveRelease(t *testing.T, body []byte) managedRelease {
 	digest := sha256.Sum256(body)
 	return managedRelease{
 		Architecture:  production.Architecture,
+		CacheKey:      production.CacheKey,
 		ArchiveName:   "synthetic-rootfs.tar.gz",
 		URL:           testReleaseURL,
 		ArchiveSHA256: hex.EncodeToString(digest[:]),
@@ -159,6 +160,49 @@ func testProvisioner(t *testing.T, body []byte, status int, requests *atomic.Int
 	}
 }
 
+func testRemoteSource(t *testing.T, body []byte, treeSHA256 string) RemoteSource {
+	t.Helper()
+	digest := sha256.Sum256(body)
+	return RemoteSource{
+		URL:           "https://mirror.example/rootfs.tar.gz",
+		Architecture:  runtime.GOARCH,
+		ArchiveSHA256: hex.EncodeToString(digest[:]),
+		TreeSHA256:    treeSHA256,
+	}
+}
+
+func testRemoteProvisioner(t *testing.T, body []byte, remote RemoteSource, requests *atomic.Int32) *Provisioner {
+	t.Helper()
+	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+		if requests != nil {
+			requests.Add(1)
+		}
+		return testResponse(http.StatusOK, body), nil
+	})
+	return &Provisioner{
+		CacheDir: t.TempDir(),
+		Client:   &http.Client{Transport: transport, Timeout: 2 * time.Second},
+	}
+}
+
+func remoteCachePath(t *testing.T, p *Provisioner, remote RemoteSource) string {
+	t.Helper()
+	source := managedSource{Provider: "remote", Version: "v1"}
+	release := managedRelease{
+		Architecture:  remote.Architecture,
+		CacheKey:      remote.ArchiveSHA256,
+		ArchiveName:   "rootfs.tar.gz",
+		URL:           remote.URL,
+		ArchiveSHA256: remote.ArchiveSHA256,
+		TreeSHA256:    remote.TreeSHA256,
+	}
+	target, err := cachePath(p.CacheDir, source, release)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
 func testCachePath(t *testing.T, p *Provisioner) string {
 	t.Helper()
 	source := p.sourceForProvisioning()
@@ -208,6 +252,131 @@ func TestProvisionAndReuseOffline(t *testing.T) {
 	}
 }
 
+func TestRemoteRootfsProvisionAndOfflineReuse(t *testing.T) {
+	body := minimalArchive(t)
+	remote := testRemoteSource(t, body, "")
+	var requests atomic.Int32
+	p := testRemoteProvisioner(t, body, remote, &requests)
+	target, err := p.ResolveRemote(remote)
+	if err != nil {
+		t.Fatalf("first ResolveRemote() error = %v", err)
+	}
+	if strings.Contains(target, remote.URL) || filepath.Base(target) != remote.ArchiveSHA256 {
+		t.Fatalf("remote cache path = %q, want only the archive digest as its key", target)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("request count = %d, want 1", requests.Load())
+	}
+	data, err := os.ReadFile(filepath.Join(target, manifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got manifest
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Provider != "remote" || got.Version != "v1" || got.SHA256 != remote.ArchiveSHA256 || got.TreeSHA256 == "" {
+		t.Fatalf("remote manifest = %+v, want verified remote metadata", got)
+	}
+
+	offline := remote
+	offline.URL = "https://another.example/rootfs.tar.gz"
+	p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, errors.New("offline")
+	})
+	gotTarget, err := p.ResolveRemote(offline)
+	if err != nil || gotTarget != target {
+		t.Fatalf("offline ResolveRemote() = %q, %v; want %q, nil", gotTarget, err, target)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("same archive digest made another request: %d", requests.Load())
+	}
+}
+
+func TestRemoteRootfsRejectsInvalidMetadataBeforeCacheOrNetwork(t *testing.T) {
+	body := minimalArchive(t)
+	digest := sha256.Sum256(body)
+	valid := RemoteSource{
+		URL:           "https://mirror.example/rootfs.tar.gz",
+		Architecture:  runtime.GOARCH,
+		ArchiveSHA256: hex.EncodeToString(digest[:]),
+	}
+	for _, tt := range []struct {
+		name   string
+		update func(*RemoteSource)
+	}{
+		{name: "architecture", update: func(remote *RemoteSource) { remote.Architecture = "other" }},
+		{name: "url", update: func(remote *RemoteSource) { remote.URL = "http://mirror.example/rootfs.tar.gz" }},
+		{name: "uppercase digest", update: func(remote *RemoteSource) { remote.ArchiveSHA256 = strings.ToUpper(remote.ArchiveSHA256) }},
+		{name: "short digest", update: func(remote *RemoteSource) { remote.ArchiveSHA256 = remote.ArchiveSHA256[:63] }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			remote := valid
+			tt.update(&remote)
+			var requests atomic.Int32
+			p := testRemoteProvisioner(t, body, valid, &requests)
+			if _, err := p.ResolveRemote(remote); err == nil {
+				t.Fatal("ResolveRemote() accepted invalid metadata")
+			}
+			if requests.Load() != 0 {
+				t.Fatalf("invalid metadata made %d network requests", requests.Load())
+			}
+			entries, err := os.ReadDir(p.CacheDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("invalid metadata modified cache: %v", entries)
+			}
+		})
+	}
+}
+
+func TestRemoteRootfsRejectsArchiveAndTreeMismatches(t *testing.T) {
+	body := minimalArchive(t)
+	remote := testRemoteSource(t, body, strings.Repeat("0", 64))
+	p := testRemoteProvisioner(t, body, remote, nil)
+	if _, err := p.ResolveRemote(remote); err == nil || !strings.Contains(err.Error(), "SHA-256 mismatch") {
+		t.Fatalf("archive mismatch error = %v", err)
+	}
+	if _, err := os.Stat(remoteCachePath(t, p, remote)); !os.IsNotExist(err) {
+		t.Fatalf("archive mismatch left published cache: %v", err)
+	}
+
+	digest := sha256.Sum256(body)
+	remote = testRemoteSource(t, body, strings.Repeat("f", 64))
+	remote.ArchiveSHA256 = hex.EncodeToString(digest[:])
+	p = testRemoteProvisioner(t, body, remote, nil)
+	if _, err := p.ResolveRemote(remote); err == nil || !strings.Contains(err.Error(), "tree SHA-256 mismatch") {
+		t.Fatalf("tree mismatch error = %v", err)
+	}
+	if _, err := os.Stat(remoteCachePath(t, p, remote)); !os.IsNotExist(err) {
+		t.Fatalf("tree mismatch left published cache: %v", err)
+	}
+}
+
+func TestRemoteRootfsCacheModificationIsDetected(t *testing.T) {
+	body := minimalArchive(t)
+	remote := testRemoteSource(t, body, "")
+	var requests atomic.Int32
+	p := testRemoteProvisioner(t, body, remote, &requests)
+	target, err := p.ResolveRemote(remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, "bin", "busybox"), []byte("modified"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		requests.Add(1)
+		return nil, errors.New("offline")
+	})
+	if _, err := p.ResolveRemote(remote); err == nil || !strings.Contains(err.Error(), "offline") {
+		t.Fatalf("modified remote cache was accepted: %v", err)
+	}
+}
+
 func TestSelectedManagedSourceControlsCacheAndManifest(t *testing.T) {
 	body := minimalArchive(t)
 	p := testProvisioner(t, body, http.StatusOK, nil)
@@ -217,7 +386,7 @@ func TestSelectedManagedSourceControlsCacheAndManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := filepath.Join(p.CacheDir, "bcs-zc241t-sandbox", "rootfs", "test-provider", "test-version", release.Architecture)
+	want := filepath.Join(p.CacheDir, "bcs-zc241t-sandbox", "rootfs", "test-provider", "test-version", release.CacheKey)
 	if target != want {
 		t.Fatalf("managed cache path = %q, want %q", target, want)
 	}
@@ -243,6 +412,7 @@ func TestInvalidManagedMetadataDoesNotTouchCacheOrNetwork(t *testing.T) {
 		{name: "empty provider", update: func(source *managedSource, _ *managedRelease) { source.Provider = "" }},
 		{name: "traversal version", update: func(source *managedSource, _ *managedRelease) { source.Version = "../version" }},
 		{name: "empty architecture", update: func(_ *managedSource, release *managedRelease) { release.Architecture = "" }},
+		{name: "empty cache key", update: func(_ *managedSource, release *managedRelease) { release.CacheKey = "" }},
 		{name: "traversal archive name", update: func(_ *managedSource, release *managedRelease) { release.ArchiveName = "../archive" }},
 		{name: "invalid archive digest", update: func(_ *managedSource, release *managedRelease) { release.ArchiveSHA256 = strings.Repeat("0", 63) }},
 		{name: "invalid tree digest", update: func(_ *managedSource, release *managedRelease) { release.TreeSHA256 = strings.Repeat("g", 64) }},
@@ -922,18 +1092,21 @@ func TestCacheSymlinksAndUnsafeModesFailClosed(t *testing.T) {
 func TestReleaseMetadataIsPinned(t *testing.T) {
 	want := map[string]struct {
 		alpineArch string
+		cacheKey   string
 		archive    string
 		sha256     string
 		treeSHA256 string
 	}{
 		"amd64": {
 			alpineArch: "x86_64",
+			cacheKey:   "x86_64",
 			archive:    "alpine-minirootfs-3.24.1-x86_64.tar.gz",
 			sha256:     "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
 			treeSHA256: "f35a4d7394df512b1727eebe935f54cc38a4b15154e56ad74722cb3683c4eb9f",
 		},
 		"arm64": {
 			alpineArch: "aarch64",
+			cacheKey:   "aarch64",
 			archive:    "alpine-minirootfs-3.24.1-aarch64.tar.gz",
 			sha256:     "f55a90f69052c5bd6f92cb09a8f47065970830b194c917a006fb94028e721259",
 			treeSHA256: "d685f267ee308d816da007134d44d1e661b4a69ca81ede67b19381eeb25dbb66",
@@ -941,7 +1114,7 @@ func TestReleaseMetadataIsPinned(t *testing.T) {
 	}
 	for goArch, expected := range want {
 		release, ok := defaultManagedSource.Releases[goArch]
-		if !ok || release.Architecture != expected.alpineArch || release.ArchiveName != expected.archive || release.ArchiveSHA256 != expected.sha256 || release.TreeSHA256 != expected.treeSHA256 {
+		if !ok || release.Architecture != expected.alpineArch || release.CacheKey != expected.cacheKey || release.ArchiveName != expected.archive || release.ArchiveSHA256 != expected.sha256 || release.TreeSHA256 != expected.treeSHA256 {
 			t.Errorf("defaultManagedSource.Releases[%q] = %+v, want %+v", goArch, release, expected)
 		}
 	}
