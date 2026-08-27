@@ -852,6 +852,44 @@ func TestDownloadTimeout(t *testing.T) {
 	}
 }
 
+func TestDownloadUsesCallerContextWithoutTotalDeadline(t *testing.T) {
+	body := minimalArchive(t)
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	p.Client = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if _, ok := request.Context().Deadline(); ok {
+			t.Error("download request unexpectedly has a total deadline")
+		}
+		return testResponse(http.StatusOK, body), nil
+	})}
+	if _, err := p.Resolve(""); err != nil {
+		t.Fatalf("Resolve() = %v", err)
+	}
+}
+
+func TestDefaultHTTPClientUsesSetupTimeoutsOnly(t *testing.T) {
+	origin, err := url.Parse(testReleaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := defaultHTTPClientFor(origin)
+	if client.Timeout != 0 {
+		t.Fatalf("default client timeout = %s, want zero", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("default transport type = %T, want *http.Transport", client.Transport)
+	}
+	if transport.TLSHandshakeTimeout != tlsHandshakeTimeout {
+		t.Fatalf("TLS handshake timeout = %s, want %s", transport.TLSHandshakeTimeout, tlsHandshakeTimeout)
+	}
+	if transport.ResponseHeaderTimeout != responseHeaderTimeout {
+		t.Fatalf("response header timeout = %s, want %s", transport.ResponseHeaderTimeout, responseHeaderTimeout)
+	}
+	if dialer := defaultDialer(); dialer.Timeout != connectTimeout {
+		t.Fatalf("connection timeout = %s, want %s", dialer.Timeout, connectTimeout)
+	}
+}
+
 func TestSecureExtraction(t *testing.T) {
 	tests := []struct {
 		name    string

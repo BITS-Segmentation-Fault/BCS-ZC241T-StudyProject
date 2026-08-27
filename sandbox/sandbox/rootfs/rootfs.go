@@ -29,9 +29,10 @@ const (
 	lockName              = ".lock"
 	manifestSchemaVersion = 1
 
-	requestTimeout   = 45 * time.Second
-	connectTimeout   = 10 * time.Second
-	maxManifestBytes = 4 << 10
+	connectTimeout        = 10 * time.Second
+	tlsHandshakeTimeout   = 10 * time.Second
+	responseHeaderTimeout = 30 * time.Second
+	maxManifestBytes      = 4 << 10
 )
 
 type managedSource struct {
@@ -79,7 +80,7 @@ var defaultManagedSource = managedSource{
 
 // Provisioner resolves explicit rootfs paths or provisions the managed
 // rootfs in the user's cache. Client may be supplied by hermetic tests;
-// the zero value uses the timeout- and redirect-checked default client.
+// the zero value uses the setup-timeout- and redirect-checked default client.
 type Provisioner struct {
 	CacheDir string
 	Client   *http.Client
@@ -287,14 +288,9 @@ func (p Provisioner) download(ctx context.Context, release managedRelease, desti
 			clone.Transport = defaultHTTPClientFor(origin).Transport
 		}
 		clone.CheckRedirect = redirectPolicy(origin)
-		if clone.Timeout == 0 {
-			clone.Timeout = requestTimeout
-		}
 		client = &clone
 	}
-	requestContext, cancel := context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
-	request, err := http.NewRequestWithContext(requestContext, http.MethodGet, release.URL, nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, release.URL, nil)
 	if err != nil {
 		return fmt.Errorf("cannot create download request: %v", err)
 	}
@@ -335,12 +331,17 @@ func (p Provisioner) download(ctx context.Context, release managedRelease, desti
 
 func defaultHTTPClientFor(origin *url.URL) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.DialContext = (&net.Dialer{Timeout: connectTimeout}).DialContext
+	transport.DialContext = defaultDialer().DialContext
+	transport.TLSHandshakeTimeout = tlsHandshakeTimeout
+	transport.ResponseHeaderTimeout = responseHeaderTimeout
 	return &http.Client{
 		Transport:     transport,
-		Timeout:       requestTimeout,
 		CheckRedirect: redirectPolicy(origin),
 	}
+}
+
+func defaultDialer() *net.Dialer {
+	return &net.Dialer{Timeout: connectTimeout}
 }
 
 func validateReleaseURL(raw string) (*url.URL, error) {
