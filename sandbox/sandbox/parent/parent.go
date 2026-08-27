@@ -29,7 +29,9 @@ func Parent(cfg config.Config) (result int) {
 		return 1
 	}
 	cfg = snapshotEnvironment(cfg, os.Environ())
-	provisioner := rootfs.Provisioner{}
+	renderer := newProgressRenderer(os.Stderr)
+	defer renderer.finish()
+	provisioner := rootfs.Provisioner{Progress: renderer.report}
 	var resolvedRootFS string
 	var err error
 	if cfg.RemoteRootFS != nil {
@@ -46,9 +48,11 @@ func Parent(cfg config.Config) (result int) {
 		resolvedRootFS, err = provisioner.Resolve(cfg.RootFSSource)
 	}
 	if err != nil {
+		renderer.finish()
 		log.Printf("[PRE-FLIGHT ERROR] rootfs cannot be provisioned: %v", err)
 		return 1
 	}
+	renderer.finish()
 	cfg.RootFSSource = resolvedRootFS
 	cfg.RemoteRootFS = nil
 	signals := make(chan os.Signal, 4)

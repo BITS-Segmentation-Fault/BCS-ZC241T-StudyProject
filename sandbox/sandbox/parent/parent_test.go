@@ -3,13 +3,16 @@
 package parent
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 
 	"sandbox/sandbox/config"
+	"sandbox/sandbox/rootfs"
 )
 
 func TestWaitForChild_ReturnsExitStatus(t *testing.T) {
@@ -31,6 +34,52 @@ func TestWaitForChild_ReturnsExitStatus(t *testing.T) {
 				t.Fatalf("waitForChild() = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestProgressRendererSilenceAndTTYOutput(t *testing.T) {
+	var output bytes.Buffer
+	silent := &progressRenderer{out: &output}
+	silent.report(rootfs.ProgressEvent{Phase: rootfs.ProgressDownloadingArchive, Current: 1, Total: 2})
+	silent.finish()
+	if output.Len() != 0 {
+		t.Fatalf("non-TTY progress output = %q, want empty", output.String())
+	}
+
+	for _, test := range []struct {
+		name    string
+		current int64
+		total   int64
+		wantBar string
+	}{
+		{name: "zero", current: 0, total: 100, wantBar: "[>...................]"},
+		{name: "partial", current: 50, total: 100, wantBar: "[==========>.........]"},
+		{name: "complete", current: 100, total: 100, wantBar: "[====================]"},
+		{name: "over-reported", current: 150, total: 100, wantBar: "[====================]"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			output.Reset()
+			renderer := &progressRenderer{out: &output, tty: true}
+			renderer.report(rootfs.ProgressEvent{Phase: rootfs.ProgressDownloadingArchive, Current: test.current, Total: test.total})
+			renderer.finish()
+			if !strings.Contains(output.String(), test.wantBar) {
+				t.Fatalf("TTY progress output = %q, want bar %q", output.String(), test.wantBar)
+			}
+			if test.current == 50 && !strings.Contains(output.String(), "50%") {
+				t.Fatalf("TTY progress output = %q, want percentage", output.String())
+			}
+			if !strings.Contains(output.String(), "\n") {
+				t.Fatalf("TTY progress output = %q, want line finish", output.String())
+			}
+		})
+	}
+
+	output.Reset()
+	renderer := &progressRenderer{out: &output, tty: true}
+	renderer.report(rootfs.ProgressEvent{Phase: rootfs.ProgressDownloadingArchive, Current: 1, Total: 0})
+	renderer.finish()
+	if strings.Contains(output.String(), "%") || strings.Contains(output.String(), "NaN") {
+		t.Fatalf("unknown-total progress output = %q, want no percentage", output.String())
 	}
 }
 

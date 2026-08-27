@@ -38,6 +38,10 @@ var defaultRootfsLimits = rootfsLimits{
 }
 
 func extractArchive(archivePath, destination string, limits rootfsLimits) (extractionStats, error) {
+	return extractArchiveWithProgress(archivePath, destination, limits, nil)
+}
+
+func extractArchiveWithProgress(archivePath, destination string, limits rootfsLimits, progress func(int64)) (extractionStats, error) {
 	archive, err := os.Open(archivePath)
 	if err != nil {
 		return extractionStats{}, fmt.Errorf("cannot open rootfs archive: %w", err)
@@ -91,7 +95,7 @@ func extractArchive(archivePath, destination string, limits rootfsLimits) (extra
 				return err
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			if err := extractRegularFile(destination, name, file, limits, &extractedBytes); err != nil {
+			if err := extractRegularFile(destination, name, file, limits, &extractedBytes, progress); err != nil {
 				return err
 			}
 			if file.Size() > largestFileBytes {
@@ -155,7 +159,7 @@ func archiveEntryKind(file archives.FileInfo) (byte, error) {
 	return tar.TypeReg, nil
 }
 
-func extractRegularFile(destination, name string, file archives.FileInfo, limits rootfsLimits, extractedBytes *int64) (err error) {
+func extractRegularFile(destination, name string, file archives.FileInfo, limits rootfsLimits, extractedBytes *int64, progress func(int64)) (err error) {
 	declaredSize := file.Size()
 	if declaredSize < 0 || declaredSize > limits.MaxFileBytes {
 		return fmt.Errorf("rootfs file %q exceeds the %d-byte file limit", name, limits.MaxFileBytes)
@@ -190,7 +194,11 @@ func extractRegularFile(destination, name string, file archives.FileInfo, limits
 		}
 	}()
 
-	count, copyErr := io.Copy(output, io.LimitReader(input, readLimit+1))
+	var outputWriter io.Writer = output
+	if progress != nil {
+		outputWriter = &progressWriter{writer: output, current: *extractedBytes, report: progress}
+	}
+	count, copyErr := io.Copy(outputWriter, io.LimitReader(input, readLimit+1))
 	if copyErr != nil {
 		_ = output.Close()
 		return fmt.Errorf("cannot extract rootfs file %q: %w", name, copyErr)
@@ -224,6 +232,9 @@ func extractRegularFile(destination, name string, file archives.FileInfo, limits
 	}
 	remove = false
 	*extractedBytes += count
+	if progress != nil {
+		progress(*extractedBytes)
+	}
 	return nil
 }
 

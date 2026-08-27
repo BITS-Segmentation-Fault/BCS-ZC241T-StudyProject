@@ -87,6 +87,7 @@ var defaultManagedSource = managedSource{
 type Provisioner struct {
 	CacheDir string
 	Client   *http.Client
+	Progress ProgressFunc
 
 	// source is intentionally private: tests replace the catalog with small
 	// synthetic archives, while production uses the pinned default above.
@@ -257,6 +258,7 @@ func (p Provisioner) provision(cacheDir, target string, source managedSource, re
 	defer unix.Close(versionFD)
 	target = filepath.Join(versionDir, release.CacheKey)
 
+	p.reportProgress(ProgressEvent{Phase: ProgressWaitingForCacheLock})
 	lock, err := acquireLockAt(versionFD)
 	if err != nil {
 		return "", p.provisionError(release, target, fmt.Errorf("cannot lock cache: %v", err))
@@ -264,6 +266,7 @@ func (p Provisioner) provision(cacheDir, target string, source managedSource, re
 	defer lock.Close()
 
 	targetName := release.CacheKey
+	p.reportProgress(ProgressEvent{Phase: ProgressValidatingCache})
 	if err := validatePublishedRootfsAt(versionFD, targetName, source, release, limits); err == nil {
 		return target, nil
 	}
@@ -292,7 +295,10 @@ func (p Provisioner) provision(cacheDir, target string, source managedSource, re
 	if err := os.Mkdir(extracted, 0700); err != nil {
 		return "", p.provisionError(release, target, fmt.Errorf("cannot create extraction directory: %v", err))
 	}
-	stats, err := extractArchive(archivePath, extracted, limits)
+	p.reportProgress(ProgressEvent{Phase: ProgressExtractingFiles})
+	stats, err := extractArchiveWithProgress(archivePath, extracted, limits, func(current int64) {
+		p.reportProgress(ProgressEvent{Phase: ProgressExtractingFiles, Current: current})
+	})
 	if err != nil {
 		return "", p.provisionError(release, target, err)
 	}
@@ -305,6 +311,7 @@ func (p Provisioner) provision(cacheDir, target string, source managedSource, re
 	if err := syncDirectoryPath(extracted, "completed rootfs"); err != nil {
 		return "", p.provisionError(release, target, err)
 	}
+	p.reportProgress(ProgressEvent{Phase: ProgressPublishingCache})
 	if err := publishReplacement(versionFD, temporaryName, targetName, p.renamePath); err != nil {
 		return "", p.provisionError(release, target, err)
 	}
@@ -338,6 +345,7 @@ func (p Provisioner) download(ctx context.Context, release managedRelease, desti
 	if err != nil {
 		return fmt.Errorf("cannot create download request: %v", err)
 	}
+	p.reportProgress(ProgressEvent{Phase: ProgressDownloadingArchive})
 	response, err := client.Do(request)
 	if err != nil {
 		return safeDownloadError(request.URL, err)
@@ -346,6 +354,11 @@ func (p Provisioner) download(ctx context.Context, release managedRelease, desti
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("download returned HTTP status %s", response.Status)
 	}
+	total := response.ContentLength
+	if total < 1 {
+		total = 0
+	}
+	p.reportProgress(ProgressEvent{Phase: ProgressDownloadingArchive, Total: total})
 	file, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return fmt.Errorf("cannot create archive temporary file: %v", err)
@@ -359,7 +372,13 @@ func (p Provisioner) download(ctx context.Context, release managedRelease, desti
 	}()
 
 	hash := sha256.New()
-	_, err = io.Copy(io.MultiWriter(file, hash), response.Body)
+	reader := &progressReader{
+		reader: response.Body,
+		report: func(current int64) {
+			p.reportProgress(ProgressEvent{Phase: ProgressDownloadingArchive, Current: current, Total: total})
+		},
+	}
+	_, err = io.Copy(io.MultiWriter(file, hash), reader)
 	if err != nil {
 		return fmt.Errorf("cannot save downloaded archive: %v", err)
 	}

@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -930,6 +931,182 @@ func TestDefaultHTTPClientUsesSetupTimeoutsOnly(t *testing.T) {
 	}
 	if dialer := defaultDialer(); dialer.Timeout != connectTimeout {
 		t.Fatalf("connection timeout = %s, want %s", dialer.Timeout, connectTimeout)
+	}
+}
+
+func TestProvisioningProgressEvents(t *testing.T) {
+	body := minimalArchive(t)
+	var events []ProgressEvent
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	p.Progress = func(event ProgressEvent) {
+		events = append(events, event)
+	}
+	target, err := p.Resolve("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var phases []ProgressPhase
+	for _, event := range events {
+		if len(phases) == 0 || phases[len(phases)-1] != event.Phase {
+			phases = append(phases, event.Phase)
+		}
+	}
+	want := []ProgressPhase{
+		ProgressWaitingForCacheLock,
+		ProgressValidatingCache,
+		ProgressDownloadingArchive,
+		ProgressExtractingFiles,
+		ProgressPublishingCache,
+	}
+	if !reflect.DeepEqual(phases, want) {
+		t.Fatalf("progress phases = %#v, want %#v", phases, want)
+	}
+	knownDownloadTotal := false
+	for _, event := range events {
+		if event.Phase == ProgressDownloadingArchive && event.Total > 0 {
+			knownDownloadTotal = true
+			if event.Total != int64(len(body)) {
+				t.Fatalf("download total = %d, want %d", event.Total, len(body))
+			}
+		}
+	}
+	if !knownDownloadTotal {
+		t.Fatal("known download total was not reported")
+	}
+	extractionPartial := false
+	for _, event := range events {
+		if event.Phase == ProgressExtractingFiles && event.Current > 0 {
+			extractionPartial = true
+		}
+	}
+	if !extractionPartial {
+		t.Fatal("extraction progress was not reported during file copying")
+	}
+	events = nil
+	if got, err := p.Resolve(""); err != nil || got != target {
+		t.Fatalf("cached Resolve() = %q, %v; want %q, nil", got, err, target)
+	}
+	for _, event := range events {
+		if event.Phase != ProgressWaitingForCacheLock && event.Phase != ProgressValidatingCache {
+			t.Fatalf("cache hit emitted phase %q", event.Phase)
+		}
+	}
+
+	p = testProvisioner(t, body, http.StatusOK, nil)
+	var unknownTotal bool
+	p.Progress = func(event ProgressEvent) {
+		if event.Phase == ProgressDownloadingArchive && event.Total == 0 {
+			unknownTotal = true
+		}
+	}
+	p.Client.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		response := testResponse(http.StatusOK, body)
+		response.ContentLength = -1
+		return response, nil
+	})
+	if _, err := p.Resolve(""); err != nil {
+		t.Fatal(err)
+	}
+	if !unknownTotal {
+		t.Fatal("unknown download total was not reported")
+	}
+}
+
+func TestProgressWaitingEventPrecedesCacheLock(t *testing.T) {
+	body := minimalArchive(t)
+	p := testProvisioner(t, body, http.StatusOK, nil)
+	source := p.sourceForProvisioning()
+	_, versionFD, err := ensureManagedVersionDir(p.CacheDir, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(versionFD)
+	lock, err := acquireLockAt(versionFD)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := make(chan ProgressEvent, 32)
+	p.Progress = func(event ProgressEvent) {
+		events <- event
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := p.Resolve("")
+		done <- err
+	}()
+	select {
+	case event := <-events:
+		if event.Phase != ProgressWaitingForCacheLock {
+			t.Fatalf("first blocked provisioning event = %q, want waiting for cache lock", event.Phase)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("waiting-for-lock progress event was not emitted while lock was held")
+	}
+	if err := lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("provisioning after releasing cache lock = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provisioning did not continue after releasing cache lock")
+	}
+}
+
+type progressSyntheticFileInfo struct {
+	mode fs.FileMode
+	size int64
+}
+
+func (f progressSyntheticFileInfo) Name() string       { return "synthetic" }
+func (f progressSyntheticFileInfo) Size() int64        { return f.size }
+func (f progressSyntheticFileInfo) Mode() fs.FileMode  { return f.mode }
+func (f progressSyntheticFileInfo) ModTime() time.Time { return time.Time{} }
+func (f progressSyntheticFileInfo) IsDir() bool        { return f.mode.IsDir() }
+func (f progressSyntheticFileInfo) Sys() any           { return nil }
+
+type progressChunkFile struct {
+	data []byte
+	info fs.FileInfo
+}
+
+func (f *progressChunkFile) Read(buffer []byte) (int, error) {
+	if len(f.data) == 0 {
+		return 0, io.EOF
+	}
+	if len(buffer) > 2 {
+		buffer = buffer[:2]
+	}
+	n := copy(buffer, f.data)
+	f.data = f.data[n:]
+	return n, nil
+}
+
+func (f *progressChunkFile) Close() error               { return nil }
+func (f *progressChunkFile) Stat() (fs.FileInfo, error) { return f.info, nil }
+
+func TestExtractionProgressDuringFileCopies(t *testing.T) {
+	data := bytes.Repeat([]byte("x"), 64<<10)
+	info := progressSyntheticFileInfo{mode: 0600, size: int64(len(data))}
+	destination := t.TempDir()
+	var progress []int64
+	extractedBytes := int64(0)
+	file := archives.FileInfo{
+		FileInfo: info,
+		Open: func() (fs.File, error) {
+			return &progressChunkFile{data: append([]byte(nil), data...), info: info}, nil
+		},
+	}
+	if err := extractRegularFile(destination, "file", file, defaultRootfsLimits, &extractedBytes, func(current int64) {
+		progress = append(progress, current)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(progress) < 2 || progress[len(progress)-1] != int64(len(data)) {
+		t.Fatalf("extraction progress = %#v, want partial updates ending at %d", progress, len(data))
 	}
 }
 

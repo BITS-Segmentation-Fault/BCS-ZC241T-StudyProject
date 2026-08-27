@@ -88,6 +88,7 @@ go_library(
         ":resources",
         ":rootfs",
         ":security",
+        "@org_golang_x_sys//unix:go_default_library",
     ],
 )
 
@@ -169,6 +170,7 @@ go_test(
         ":resources",
         ":rootfs",
         ":security",
+        "@org_golang_x_sys//unix:go_default_library",
     ],
 )
 
