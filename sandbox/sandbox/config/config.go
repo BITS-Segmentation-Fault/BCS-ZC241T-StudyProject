@@ -1,11 +1,15 @@
 package config
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
+	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 
 	"sandbox/sandbox/network"
@@ -26,6 +30,13 @@ type BindMount struct {
 	Writable      bool   `yaml:"writable"`
 }
 
+type RemoteRootFS struct {
+	URL           string `yaml:"url" json:"url"`
+	Architecture  string `yaml:"architecture" json:"architecture"`
+	ArchiveSHA256 string `yaml:"archive_sha256" json:"archive_sha256"`
+	TreeSHA256    string `yaml:"tree_sha256,omitempty" json:"tree_sha256,omitempty"`
+}
+
 type Config struct {
 	Command              []string             `yaml:"command"`
 	EnvVars              []string             `yaml:"env_vars"`
@@ -41,12 +52,15 @@ type Config struct {
 	BridgeConfig         network.BridgeConfig `yaml:"bridge"`
 	WorkingDir           string               `yaml:"working_dir"`
 	RootFSSource         string               `yaml:"rootfs_source"`
+	RemoteRootFS         *RemoteRootFS        `yaml:"remote_rootfs,omitempty" json:"remote_rootfs,omitempty"`
 	BindMounts           []BindMount          `yaml:"bind_mounts"`
 	DNSServers           []string             `yaml:"dns_servers"`
 	EnvWhitelist         []string             `yaml:"env_whitelist"`
 }
 
 var environmentName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+const sha256HexLength = 64
 
 func (c Config) Environment(hostEnvironment []string) []string {
 	result := append([]string(nil), c.EnvVars...)
@@ -152,6 +166,17 @@ func (c Config) Validate() error {
 	if err := validateAbsolutePath("rootfs_source", c.RootFSSource, false); err != nil {
 		return err
 	}
+	if c.RootFSSource != "" && c.RemoteRootFS != nil {
+		return errors.New("value_error: rootfs_source and remote_rootfs are mutually exclusive")
+	}
+	if c.RemoteRootFS != nil {
+		if !c.ReadOnlyRoot {
+			return errors.New("value_error: remote rootfs requires read_only_root=true")
+		}
+		if err := validateRemoteRootFS(*c.RemoteRootFS); err != nil {
+			return err
+		}
+	}
 	if err := validateAbsolutePath("working_dir", c.WorkingDir, true); err != nil {
 		return err
 	}
@@ -166,7 +191,7 @@ func (c Config) Validate() error {
 			return errors.New("value_error: bind_mount container_path cannot be root")
 		}
 	}
-	if c.RootFSSource == "" && !c.ReadOnlyRoot {
+	if c.RootFSSource == "" && c.RemoteRootFS == nil && !c.ReadOnlyRoot {
 		return errors.New("value_error: managed rootfs requires read_only_root=true")
 	}
 	if err := validateBindPolicies(c.BindMounts, len(c.DNSServers) > 0); err != nil {
@@ -181,6 +206,42 @@ func (c Config) Validate() error {
 		return err
 	}
 	return validateEnvironment(c.EnvWhitelist, "env_whitelist", false)
+}
+
+func validateRemoteRootFS(remote RemoteRootFS) error {
+	if strings.IndexByte(remote.URL, 0) >= 0 {
+		return errors.New("value_error: remote_rootfs.url contains NUL")
+	}
+	parsed, err := url.Parse(remote.URL)
+	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return errors.New("value_error: remote_rootfs.url must be an HTTPS URL without userinfo, query, or fragment")
+	}
+	if parsed.Path == "" || !strings.HasPrefix(parsed.Path, "/") || parsed.Path != path.Clean(parsed.Path) || strings.Contains(parsed.Path, "..") {
+		return errors.New("value_error: remote_rootfs.url has an unsafe path")
+	}
+	if remote.Architecture == "" {
+		return errors.New("value_error: remote_rootfs.architecture cannot be empty")
+	}
+	if remote.Architecture != runtime.GOARCH {
+		return fmt.Errorf("value_error: remote_rootfs.architecture %q does not match runtime architecture %q", remote.Architecture, runtime.GOARCH)
+	}
+	if err := validateRemoteDigest("archive_sha256", remote.ArchiveSHA256, true); err != nil {
+		return err
+	}
+	return validateRemoteDigest("tree_sha256", remote.TreeSHA256, false)
+}
+
+func validateRemoteDigest(name, value string, required bool) error {
+	if value == "" && !required {
+		return nil
+	}
+	if len(value) != sha256HexLength || value != strings.ToLower(value) {
+		return fmt.Errorf("value_error: remote_rootfs.%s must be 64 lowercase hexadecimal characters", name)
+	}
+	if _, err := hex.DecodeString(value); err != nil {
+		return fmt.Errorf("value_error: remote_rootfs.%s must be 64 lowercase hexadecimal characters", name)
+	}
+	return nil
 }
 
 func validateBindPolicies(mounts []BindMount, dnsConfigured bool) error {

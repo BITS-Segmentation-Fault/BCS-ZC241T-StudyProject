@@ -70,6 +70,25 @@ downloaded or repaired, and is not modified by the provisioning code. The
 payload must be present in the selected rootfs;
 `/bin/echo` is available in the managed Alpine rootfs.
 
+For a verified remote rootfs, configure `remote_rootfs` instead of
+`rootfs_source`:
+
+```yaml
+remote_rootfs:
+  url: https://example.com/rootfs-amd64.tar.gz
+  architecture: amd64
+  archive_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  # tree_sha256: optional pinned digest of the extracted tree
+```
+
+The remote URL must be HTTPS and the archive SHA-256 is mandatory; it must be
+lowercase and exactly 64 hexadecimal characters. Remote archives are cached
+under their digest, never under their URL, and are extracted only after the
+downloaded bytes match that digest. The extracted tree is then hashed and
+verified on every reuse. Remote rootfs launches must keep
+`read_only_root: true`; local and remote rootfs sources cannot be combined. A failed remote
+download never falls back to the built-in Alpine rootfs.
+
 The namespace-free archive maintenance check can be run with
 `SANDBOX_ALPINE_MAINTENANCE=1`; it downloads both pinned archives, verifies
 their archive digests, securely extracts them, and verifies their tree digests.

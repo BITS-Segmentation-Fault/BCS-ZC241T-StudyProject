@@ -29,12 +29,26 @@ func Parent(cfg config.Config) (result int) {
 		return 1
 	}
 	cfg = snapshotEnvironment(cfg, os.Environ())
-	resolvedRootFS, err := (rootfs.Provisioner{}).Resolve(cfg.RootFSSource)
+	provisioner := rootfs.Provisioner{}
+	var resolvedRootFS string
+	var err error
+	if cfg.RemoteRootFS != nil {
+		remote := rootfs.RemoteSource{
+			URL:           cfg.RemoteRootFS.URL,
+			Architecture:  cfg.RemoteRootFS.Architecture,
+			ArchiveSHA256: cfg.RemoteRootFS.ArchiveSHA256,
+			TreeSHA256:    cfg.RemoteRootFS.TreeSHA256,
+		}
+		resolvedRootFS, err = provisioner.ResolveRemote(remote)
+	} else {
+		resolvedRootFS, err = provisioner.Resolve(cfg.RootFSSource)
+	}
 	if err != nil {
 		log.Printf("[PRE-FLIGHT ERROR] rootfs cannot be provisioned: %v", err)
 		return 1
 	}
 	cfg.RootFSSource = resolvedRootFS
+	cfg.RemoteRootFS = nil
 	signals := make(chan os.Signal, 4)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	defer signal.Stop(signals)

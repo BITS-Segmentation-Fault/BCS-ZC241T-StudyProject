@@ -1,6 +1,7 @@
 package config
 
 import (
+	"runtime"
 	"strings"
 	"testing"
 
@@ -147,5 +148,73 @@ func TestCapabilityLookup(t *testing.T) {
 	}
 	if !isKnownCapability(" all ") || isKnownCapability("CAP_UNKNOWN") {
 		t.Fatal("capability validation mismatch")
+	}
+}
+
+func validRemoteRootFS() *RemoteRootFS {
+	return &RemoteRootFS{
+		URL:           "https://mirror.example/rootfs.tar.gz",
+		Architecture:  runtime.GOARCH,
+		ArchiveSHA256: strings.Repeat("a", 64),
+	}
+}
+
+func TestRootfsSourceModes(t *testing.T) {
+	tests := []struct {
+		name   string
+		change func(*Config)
+		want   string
+	}{
+		{name: "default", change: func(*Config) {}, want: ""},
+		{name: "local", change: func(c *Config) { c.RootFSSource = "/tmp/rootfs" }, want: ""},
+		{name: "remote", change: func(c *Config) { c.RemoteRootFS = validRemoteRootFS() }, want: ""},
+		{name: "both", change: func(c *Config) {
+			c.RootFSSource = "/tmp/rootfs"
+			c.RemoteRootFS = validRemoteRootFS()
+		}, want: "mutually exclusive"},
+		{name: "missing URL", change: func(c *Config) { remote := validRemoteRootFS(); remote.URL = ""; c.RemoteRootFS = remote }, want: "remote_rootfs.url"},
+		{name: "missing architecture", change: func(c *Config) { remote := validRemoteRootFS(); remote.Architecture = ""; c.RemoteRootFS = remote }, want: "architecture"},
+		{name: "missing archive digest", change: func(c *Config) { remote := validRemoteRootFS(); remote.ArchiveSHA256 = ""; c.RemoteRootFS = remote }, want: "archive_sha256"},
+		{name: "uppercase archive digest", change: func(c *Config) {
+			remote := validRemoteRootFS()
+			remote.ArchiveSHA256 = strings.Repeat("A", 64)
+			c.RemoteRootFS = remote
+		}, want: "archive_sha256"},
+		{name: "writable remote", change: func(c *Config) { c.ReadOnlyRoot = false; c.RemoteRootFS = validRemoteRootFS() }, want: "read_only_root"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := validConfig()
+			tt.change(&c)
+			err := c.Validate()
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() = %v, want valid configuration", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Validate() = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRemoteURLValidation(t *testing.T) {
+	for _, url := range []string{
+		"http://mirror.example/rootfs.tar.gz",
+		"https://user@mirror.example/rootfs.tar.gz",
+		"https://mirror.example/rootfs.tar.gz?x=1",
+		"https://mirror.example/rootfs.tar.gz#fragment",
+		"https://mirror.example/rootfs/../rootfs.tar.gz",
+		"https://mirror.example/rootfs\x00.tar.gz",
+	} {
+		c := validConfig()
+		remote := validRemoteRootFS()
+		remote.URL = url
+		c.RemoteRootFS = remote
+		if err := c.Validate(); err == nil {
+			t.Errorf("Validate() accepted unsafe remote URL %q", url)
+		}
 	}
 }
