@@ -37,6 +37,22 @@ var defaultRootfsLimits = rootfsLimits{
 	MaxEntries:    100000,
 }
 
+type archiveDevice struct {
+	Major uint32
+	Minor uint32
+}
+
+var standardDevicePlaceholders = map[string]archiveDevice{
+	"dev/console": {Major: 5, Minor: 1},
+	"dev/full":    {Major: 1, Minor: 7},
+	"dev/null":    {Major: 1, Minor: 3},
+	"dev/ptmx":    {Major: 5, Minor: 2},
+	"dev/random":  {Major: 1, Minor: 8},
+	"dev/tty":     {Major: 5, Minor: 0},
+	"dev/urandom": {Major: 1, Minor: 9},
+	"dev/zero":    {Major: 1, Minor: 5},
+}
+
 func extractArchive(archivePath, destination string, limits rootfsLimits) (extractionStats, error) {
 	return extractArchiveWithProgress(archivePath, destination, limits, nil)
 }
@@ -78,15 +94,17 @@ func extractArchiveWithProgress(archivePath, destination string, limits rootfsLi
 			}
 			return nil
 		}
-		kind, err := archiveEntryKind(file)
+		kind, err := archiveEntryKind(name, file)
 		if err != nil {
 			return fmt.Errorf("rootfs archive entry %q: %w", name, err)
 		}
 		if err := checkEntryConflicts(name, kind, entries); err != nil {
 			return err
 		}
-		if err := ensureParentDirectories(destination, name); err != nil {
-			return err
+		if kind != tar.TypeChar {
+			if err := ensureParentDirectories(destination, name); err != nil {
+				return err
+			}
 		}
 
 		switch kind {
@@ -112,6 +130,9 @@ func extractArchiveWithProgress(archivePath, destination string, limits rootfsLi
 			if err := extractHardlink(destination, name, file.LinkTarget); err != nil {
 				return err
 			}
+		case tar.TypeChar:
+			// Ubuntu device placeholders are validated but deliberately not
+			// materialized in the extracted tree.
 		default:
 			return fmt.Errorf("rootfs archive entry %q uses unsupported type", name)
 		}
@@ -143,13 +164,29 @@ func extractArchiveWithProgress(archivePath, destination string, limits rootfsLi
 	return extractionStats{TotalBytes: extractedBytes, LargestFileBytes: largestFileBytes, Entries: entryCount}, nil
 }
 
-func archiveEntryKind(file archives.FileInfo) (byte, error) {
+func archiveEntryKind(name string, file archives.FileInfo) (byte, error) {
 	mode := file.Mode()
 	switch {
 	case mode.IsDir():
 		return tar.TypeDir, nil
 	case mode&fs.ModeSymlink != 0:
 		return tar.TypeSymlink, nil
+	case mode&fs.ModeCharDevice != 0:
+		header, ok := file.Header.(*tar.Header)
+		if !ok || header.Typeflag != tar.TypeChar {
+			return 0, fmt.Errorf("uses unsupported character device without trustworthy tar device metadata")
+		}
+		if header.Size != 0 {
+			return 0, fmt.Errorf("uses non-empty character device entry")
+		}
+		expected, ok := standardDevicePlaceholders[name]
+		if !ok {
+			return 0, fmt.Errorf("uses unsupported character device")
+		}
+		if header.Devmajor != int64(expected.Major) || header.Devminor != int64(expected.Minor) {
+			return 0, fmt.Errorf("uses device number %d:%d, want %d:%d", header.Devmajor, header.Devminor, expected.Major, expected.Minor)
+		}
+		return tar.TypeChar, nil
 	case !mode.IsRegular():
 		return 0, fmt.Errorf("uses unsupported type")
 	}

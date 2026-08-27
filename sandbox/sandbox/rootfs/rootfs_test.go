@@ -31,11 +31,13 @@ import (
 )
 
 type archiveEntry struct {
-	name string
-	kind byte
-	mode int64
-	body []byte
-	link string
+	name  string
+	kind  byte
+	mode  int64
+	major int64
+	minor int64
+	body  []byte
+	link  string
 }
 
 func makeArchive(t *testing.T, entries ...archiveEntry) []byte {
@@ -63,6 +65,8 @@ func makeTarArchive(t *testing.T, entries ...archiveEntry) []byte {
 			Size:     int64(len(entry.body)),
 			Typeflag: entry.kind,
 			Linkname: entry.link,
+			Devmajor: entry.major,
+			Devminor: entry.minor,
 		}
 		if entry.kind == tar.TypeDir || entry.kind == tar.TypeSymlink || entry.kind == tar.TypeLink {
 			header.Size = 0
@@ -1123,7 +1127,9 @@ func TestSecureExtraction(t *testing.T) {
 		{name: "symlink parent", entries: []archiveEntry{{name: "bin", kind: tar.TypeSymlink, mode: 0777, link: "."}, {name: "bin/file", kind: tar.TypeReg, mode: 0644, body: []byte("x")}}, want: "non-directory"},
 		{name: "duplicate", entries: []archiveEntry{{name: "file", kind: tar.TypeReg, mode: 0644, body: []byte("a")}, {name: "file", kind: tar.TypeReg, mode: 0644, body: []byte("b")}}, want: "duplicate"},
 		{name: "hard link outside", entries: []archiveEntry{{name: "link", kind: tar.TypeLink, mode: 0644, link: "../outside"}}, want: "invalid target"},
-		{name: "device node", entries: []archiveEntry{{name: "dev/null", kind: tar.TypeChar, mode: 0600}}, want: "unsupported type"},
+		{name: "arbitrary character device", entries: []archiveEntry{{name: "dev/custom", kind: tar.TypeChar, mode: 0600, major: 1, minor: 3}}, want: "unsupported character device"},
+		{name: "wrong character device number", entries: []archiveEntry{{name: "dev/null", kind: tar.TypeChar, mode: 0600, major: 1, minor: 5}}, want: "device number"},
+		{name: "block device", entries: []archiveEntry{{name: "dev/null", kind: tar.TypeBlock, mode: 0600, major: 1, minor: 3}}, want: "unsupported type"},
 		{name: "file too large", entries: []archiveEntry{{name: "file", kind: tar.TypeReg, mode: 0644, body: []byte("123")}}, limits: rootfsLimits{MaxTotalBytes: 1 << 20, MaxFileBytes: 2, MaxEntries: 10}, want: "file limit"},
 		{name: "total too large", entries: []archiveEntry{{name: "one", kind: tar.TypeReg, mode: 0644, body: []byte("123")}, {name: "two", kind: tar.TypeReg, mode: 0644, body: []byte("456")}}, limits: rootfsLimits{MaxTotalBytes: 5, MaxFileBytes: 10, MaxEntries: 10}, want: "extracted-data limit"},
 		{name: "too many entries", entries: []archiveEntry{{name: "one", kind: tar.TypeReg, mode: 0644, body: []byte("1")}, {name: "two", kind: tar.TypeReg, mode: 0644, body: []byte("2")}}, limits: rootfsLimits{MaxTotalBytes: 1 << 20, MaxFileBytes: 10, MaxEntries: 1}, want: "entry limit"},
@@ -1149,6 +1155,109 @@ func TestSecureExtraction(t *testing.T) {
 				t.Fatalf("extractArchive() error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestUbuntuDevicePlaceholdersAreValidatedAndIgnored(t *testing.T) {
+	entries := []archiveEntry{{name: "dev", kind: tar.TypeDir, mode: 0755}}
+	for name, device := range standardDevicePlaceholders {
+		entries = append(entries, archiveEntry{name: name, kind: tar.TypeChar, mode: 0600, major: int64(device.Major), minor: int64(device.Minor)})
+	}
+	archivePath := filepath.Join(t.TempDir(), "archive.tar.gz")
+	if err := os.WriteFile(archivePath, makeArchive(t, entries...), 0600); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "rootfs")
+	if err := os.Mkdir(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := extractArchive(archivePath, destination, defaultRootfsLimits)
+	if err != nil {
+		t.Fatalf("extractArchive() error = %v", err)
+	}
+	if stats != (extractionStats{Entries: len(standardDevicePlaceholders) + 1}) {
+		t.Fatalf("device placeholder statistics = %#v, want %d entries and no file bytes", stats, len(standardDevicePlaceholders)+1)
+	}
+	for name := range standardDevicePlaceholders {
+		if _, err := os.Lstat(filepath.Join(destination, filepath.FromSlash(name))); !os.IsNotExist(err) {
+			t.Fatalf("ignored device placeholder %q was extracted: %v", name, err)
+		}
+	}
+	if info, err := os.Stat(filepath.Join(destination, "dev")); err != nil || !info.IsDir() {
+		t.Fatalf("sanitized dev directory = %v, err=%v", info, err)
+	}
+}
+
+func TestUbuntuDevicePlaceholderConflictsAndLimits(t *testing.T) {
+	device := standardDevicePlaceholders["dev/null"]
+	tests := []struct {
+		name    string
+		entries []archiveEntry
+		limits  rootfsLimits
+		want    string
+	}{
+		{name: "duplicate", entries: []archiveEntry{
+			{name: "dev/null", kind: tar.TypeChar, mode: 0600, major: int64(device.Major), minor: int64(device.Minor)},
+			{name: "dev/null", kind: tar.TypeChar, mode: 0600, major: int64(device.Major), minor: int64(device.Minor)},
+		}, want: "duplicate"},
+		{name: "parent conflict", entries: []archiveEntry{
+			{name: "dev/null", kind: tar.TypeChar, mode: 0600, major: int64(device.Major), minor: int64(device.Minor)},
+			{name: "dev/null/child", kind: tar.TypeReg, mode: 0600, body: []byte("x")},
+		}, want: "non-directory"},
+		{name: "type conflict", entries: []archiveEntry{
+			{name: "dev/null", kind: tar.TypeChar, mode: 0600, major: int64(device.Major), minor: int64(device.Minor)},
+			{name: "dev/null", kind: tar.TypeReg, mode: 0600, body: []byte("x")},
+		}, want: "duplicate"},
+		{name: "ignored entry counts", entries: []archiveEntry{
+			{name: "dev/null", kind: tar.TypeChar, mode: 0600, major: int64(device.Major), minor: int64(device.Minor)},
+			{name: "dev/zero", kind: tar.TypeChar, mode: 0600, major: 1, minor: 5},
+		}, limits: rootfsLimits{MaxTotalBytes: 1 << 20, MaxFileBytes: 1 << 20, MaxEntries: 1}, want: "entry limit"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			archivePath := filepath.Join(t.TempDir(), "archive.tar.gz")
+			if err := os.WriteFile(archivePath, makeArchive(t, test.entries...), 0600); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "rootfs")
+			if err := os.Mkdir(destination, 0700); err != nil {
+				t.Fatal(err)
+			}
+			limits := test.limits
+			if limits.MaxTotalBytes == 0 {
+				limits = defaultRootfsLimits
+			}
+			if err := extractArchiveForTest(archivePath, destination, limits); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("extractArchive() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestArchiveSpecialEntriesRemainRejected(t *testing.T) {
+	for _, kind := range []byte{tar.TypeFifo} {
+		t.Run(fmt.Sprintf("type-%d", kind), func(t *testing.T) {
+			archivePath := filepath.Join(t.TempDir(), "archive.tar.gz")
+			if err := os.WriteFile(archivePath, makeArchive(t, archiveEntry{name: "dev/special", kind: kind, mode: 0600}), 0600); err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "rootfs")
+			if err := os.Mkdir(destination, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := extractArchiveForTest(archivePath, destination, defaultRootfsLimits); err == nil || !strings.Contains(err.Error(), "unsupported type") {
+				t.Fatalf("extractArchive() error = %v, want unsupported type", err)
+			}
+		})
+	}
+	if _, err := archiveEntryKind("dev/socket", archives.FileInfo{FileInfo: progressSyntheticFileInfo{mode: fs.ModeSocket}, Header: &tar.Header{Typeflag: tar.TypeReg}}); err == nil || !strings.Contains(err.Error(), "unsupported type") {
+		t.Fatalf("archiveEntryKind() error = %v, want unsupported socket type", err)
+	}
+}
+
+func TestNonTarCharacterDeviceMetadataIsRejected(t *testing.T) {
+	if _, err := archiveEntryKind("dev/null", archives.FileInfo{FileInfo: progressSyntheticFileInfo{mode: fs.ModeCharDevice}, Header: struct{}{}}); err == nil || !strings.Contains(err.Error(), "trustworthy tar device metadata") {
+		t.Fatalf("archiveEntryKind() error = %v, want untrusted device metadata", err)
 	}
 }
 

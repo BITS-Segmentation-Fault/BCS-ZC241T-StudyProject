@@ -21,6 +21,22 @@ const secureResolve = unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS
 const beneathResolve = unix.RESOLVE_BENEATH | secureResolve
 const emptyPathMountFlags = unix.MOVE_MOUNT_F_EMPTY_PATH
 
+type trustedDevice struct {
+	name  string
+	path  string
+	major uint32
+	minor uint32
+	fd    int
+}
+
+var privateDeviceSources = []trustedDevice{
+	{name: "null", path: "/dev/null", major: 1, minor: 3, fd: -1},
+	{name: "zero", path: "/dev/zero", major: 1, minor: 5, fd: -1},
+	{name: "full", path: "/dev/full", major: 1, minor: 7, fd: -1},
+	{name: "random", path: "/dev/random", major: 1, minor: 8, fd: -1},
+	{name: "urandom", path: "/dev/urandom", major: 1, minor: 9, fd: -1},
+}
+
 // IsolateRootFS creates and enters the isolated root. It intentionally uses
 // only the new mount API after the initial openat2 lookups: older kernels are
 // rejected instead of receiving a race-prone path-based fallback.
@@ -37,6 +53,11 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 		return fmt.Errorf("pre-flight error: cannot open rootfs %q without symlinks: %w", rootfsPath, err)
 	}
 	defer unix.Close(rootFD)
+	devices, err := openTrustedDeviceSources()
+	if err != nil {
+		return fmt.Errorf("pre-flight error: cannot open trusted device sources: %w", err)
+	}
+	defer closeTrustedDeviceSources(devices)
 
 	type heldBind struct {
 		mount  config.BindMount
@@ -59,8 +80,12 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 		if err := validateIsolationPath("bind target", bind.ContainerPath); err != nil {
 			return err
 		}
-		if filepath.Clean(bind.ContainerPath) == "/" {
+		cleanTarget := filepath.Clean(bind.ContainerPath)
+		if cleanTarget == "/" {
 			return fmt.Errorf("value_error: bind target %q cannot be root", bind.ContainerPath)
+		}
+		if cleanTarget == "/dev" || strings.HasPrefix(cleanTarget, "/dev/") {
+			return fmt.Errorf("value_error: bind target %q is reserved for the device filesystem", bind.ContainerPath)
 		}
 		source, isDir, openErr := openBindSource(bind.HostPath)
 		if openErr != nil {
@@ -70,6 +95,19 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 	}
 
 	needsOverlay := !readOnlyRoot
+	if target, targetErr := openTarget(rootFD, "/dev"); targetErr != nil {
+		if errors.Is(targetErr, unix.ENOENT) {
+			needsOverlay = true
+		} else {
+			return fmt.Errorf("pre-flight error: cannot open /dev target: %w", targetErr)
+		}
+	} else {
+		if err := requireDirectory(target, "/dev"); err != nil {
+			_ = unix.Close(target)
+			return err
+		}
+		_ = unix.Close(target)
+	}
 	if readOnlyRoot {
 		for _, bind := range holds {
 			target, targetErr := openTarget(rootFD, bind.mount.ContainerPath)
@@ -159,6 +197,17 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 			return err
 		}
 	}
+	devTarget, err := openTarget(rootMount, "/dev")
+	if err != nil && stage != nil && errors.Is(err, unix.ENOENT) {
+		devTarget, err = openOrCreateTarget(rootMount, "/dev", true)
+	}
+	if err != nil {
+		return fmt.Errorf("pre-flight error: cannot open /dev target: %w", err)
+	}
+	defer unix.Close(devTarget)
+	if err := requireDirectory(devTarget, "/dev"); err != nil {
+		return err
+	}
 	procTarget, err := openTarget(rootMount, "/proc")
 	if err != nil && stage != nil && errors.Is(err, unix.ENOENT) {
 		procTarget, err = openOrCreateTarget(rootMount, "/proc", true)
@@ -190,6 +239,10 @@ func IsolateRootFS(rootfsPath string, bindMounts []config.BindMount, readOnlyRoo
 	}
 	if err := setRecursiveMountAttrs(rootMount, rootAttrs); err != nil {
 		return fmt.Errorf("seal rootfs mount: %w", err)
+	}
+
+	if err := attachPrivateDev(rootMount, devTarget, devices); err != nil {
+		return fmt.Errorf("attach private /dev: %w", err)
 	}
 
 	for _, held := range holds {
@@ -270,6 +323,48 @@ func openBindSource(path string) (int, bool, error) {
 		return -1, false, fmt.Errorf("pre-flight error: bind source %q must be a regular file or directory", path)
 	}
 	return fd, sourceType == unix.S_IFDIR, nil
+}
+
+func openTrustedDeviceSources() ([]trustedDevice, error) {
+	devices := make([]trustedDevice, len(privateDeviceSources))
+	copy(devices, privateDeviceSources)
+	for index := range devices {
+		device := &devices[index]
+		fd, err := openSecure(unix.AT_FDCWD, device.path, unix.O_PATH|unix.O_CLOEXEC, 0)
+		if err != nil {
+			closeTrustedDeviceSources(devices)
+			return nil, fmt.Errorf("%s: %w", device.path, err)
+		}
+		device.fd = fd
+		if err := requireCharacterDevice(fd, device.path, device.major, device.minor); err != nil {
+			closeTrustedDeviceSources(devices)
+			return nil, err
+		}
+	}
+	return devices, nil
+}
+
+func closeTrustedDeviceSources(devices []trustedDevice) {
+	for _, device := range devices {
+		if device.fd >= 0 {
+			_ = unix.Close(device.fd)
+		}
+	}
+}
+
+func requireCharacterDevice(fd int, name string, major, minor uint32) error {
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return fmt.Errorf("stat trusted device source %q: %w", name, err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFCHR {
+		return fmt.Errorf("trusted device source %q is not a character device", name)
+	}
+	gotMajor, gotMinor := unix.Major(stat.Rdev), unix.Minor(stat.Rdev)
+	if gotMajor != major || gotMinor != minor {
+		return fmt.Errorf("trusted device source %q has device number %d:%d, want %d:%d", name, gotMajor, gotMinor, major, minor)
+	}
+	return nil
 }
 
 func openTarget(rootFD int, path string) (int, error) {
@@ -355,6 +450,17 @@ func openOrCreateTarget(rootFD int, path string, directory bool) (int, error) {
 func openSecureBeneath(dirfd int, path string) (int, error) {
 	how := &unix.OpenHow{Flags: unix.O_PATH | unix.O_CLOEXEC, Resolve: beneathResolve}
 	return unix.Openat2(dirfd, path, how)
+}
+
+func openDirectoryAt(dirfd int, name string) (int, error) {
+	if name == "" || strings.ContainsRune(name, '/') || name == "." || name == ".." {
+		return -1, fmt.Errorf("unsafe directory component %q", name)
+	}
+	how := &unix.OpenHow{
+		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_CLOEXEC | unix.O_NOFOLLOW),
+		Resolve: beneathResolve,
+	}
+	return unix.Openat2(dirfd, name, how)
 }
 
 type overlayStage struct {
@@ -489,17 +595,151 @@ func createOverlayRoot(lowerFD int) (int, *overlayStage, error) {
 }
 
 func mountTmpfs() (int, error) {
+	return mountTmpfsWithMode("")
+}
+
+func mountTmpfsWithMode(mode string) (int, error) {
 	context, err := unix.Fsopen("tmpfs", unix.FSOPEN_CLOEXEC)
 	if err != nil {
 		return -1, fmt.Errorf("mount API fsopen tmpfs: %w", err)
 	}
 	defer unix.Close(context)
+	if mode != "" {
+		if err := unix.FsconfigSetString(context, "mode", mode); err != nil {
+			return -1, fmt.Errorf("mount API configure tmpfs mode: %w", err)
+		}
+	}
 	if err := unix.FsconfigCreate(context); err != nil {
 		return -1, fmt.Errorf("mount API create tmpfs: %w", err)
 	}
 	mountFD, err := unix.Fsmount(context, unix.FSMOUNT_CLOEXEC, 0)
 	if err != nil {
 		return -1, fmt.Errorf("mount API fsmount tmpfs: %w", err)
+	}
+	return mountFD, nil
+}
+
+func attachPrivateDev(rootMount, devTarget int, devices []trustedDevice) error {
+	devMount, err := mountTmpfsWithMode("0755")
+	if err != nil {
+		return err
+	}
+	defer unix.Close(devMount)
+	if err := setRecursiveMountAttrs(devMount, unix.MountAttr{Attr_set: unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NOEXEC}); err != nil {
+		return fmt.Errorf("configure private /dev mount: %w", err)
+	}
+	if err := attachMount(rootMount, devTarget, devMount, "/dev", -1, unix.TMPFS_MAGIC); err != nil {
+		return fmt.Errorf("attach private tmpfs: %w", err)
+	}
+
+	devDirectory, err := openDirectoryAt(rootMount, "dev")
+	if err != nil {
+		return fmt.Errorf("open private /dev directory: %w", err)
+	}
+	defer unix.Close(devDirectory)
+	for _, link := range []struct {
+		name   string
+		target string
+	}{
+		{name: "fd", target: "/proc/self/fd"},
+		{name: "stdin", target: "/proc/self/fd/0"},
+		{name: "stdout", target: "/proc/self/fd/1"},
+		{name: "stderr", target: "/proc/self/fd/2"},
+	} {
+		if err := unix.Symlinkat(link.target, devDirectory, link.name); err != nil {
+			return fmt.Errorf("create /dev/%s symlink: %w", link.name, err)
+		}
+	}
+
+	if _, err := createPrivateDevDirectory(devDirectory, "shm", 01777); err != nil {
+		return fmt.Errorf("create /dev/shm: %w", err)
+	}
+	ptsTarget, err := createPrivateDevDirectory(devDirectory, "pts", 0755)
+	if err != nil {
+		return fmt.Errorf("create /dev/pts: %w", err)
+	}
+	defer unix.Close(ptsTarget)
+
+	for _, device := range devices {
+		if err := attachPrivateDevice(rootMount, device); err != nil {
+			return err
+		}
+	}
+
+	ptsMount, err := mountDevPTS()
+	if err != nil {
+		return err
+	}
+	defer unix.Close(ptsMount)
+	if err := setRecursiveMountAttrs(ptsMount, unix.MountAttr{Attr_set: unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NOEXEC}); err != nil {
+		return fmt.Errorf("configure private devpts mount: %w", err)
+	}
+	if err := attachMount(rootMount, ptsTarget, ptsMount, "/dev/pts", -1, unix.DEVPTS_SUPER_MAGIC); err != nil {
+		return fmt.Errorf("attach private devpts: %w", err)
+	}
+	if err := unix.Symlinkat("pts/ptmx", devDirectory, "ptmx"); err != nil {
+		return fmt.Errorf("create /dev/ptmx symlink: %w", err)
+	}
+	return nil
+}
+
+func createPrivateDevDirectory(parentFD int, name string, mode uint32) (int, error) {
+	if err := unix.Mkdirat(parentFD, name, mode); err != nil && !errors.Is(err, unix.EEXIST) {
+		return -1, err
+	}
+	fd, err := openDirectoryAt(parentFD, name)
+	if err != nil {
+		return -1, err
+	}
+	if err := requireDirectory(fd, filepath.Join("/dev", name)); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	if err := unix.Fchmod(fd, mode); err != nil {
+		_ = unix.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
+func attachPrivateDevice(rootMount int, device trustedDevice) error {
+	target, err := openOrCreateTarget(rootMount, filepath.Join("/dev", device.name), false)
+	if err != nil {
+		return fmt.Errorf("open /dev/%s target: %w", device.name, err)
+	}
+	defer unix.Close(target)
+	mountFD, err := cloneMount(device.fd, false)
+	if err != nil {
+		return fmt.Errorf("clone /dev/%s source: %w", device.name, err)
+	}
+	defer unix.Close(mountFD)
+	if err := setRecursiveMountAttrs(mountFD, unix.MountAttr{Attr_set: unix.MOUNT_ATTR_NOSUID | unix.MOUNT_ATTR_NOEXEC}); err != nil {
+		return fmt.Errorf("configure /dev/%s mount: %w", device.name, err)
+	}
+	if err := attachMount(rootMount, target, mountFD, filepath.Join("/dev", device.name), device.fd, 0); err != nil {
+		return fmt.Errorf("attach /dev/%s: %w", device.name, err)
+	}
+	return nil
+}
+
+func mountDevPTS() (int, error) {
+	context, err := unix.Fsopen("devpts", unix.FSOPEN_CLOEXEC)
+	if err != nil {
+		return -1, fmt.Errorf("mount API fsopen devpts: %w", err)
+	}
+	defer unix.Close(context)
+	if err := unix.FsconfigSetFlag(context, "newinstance"); err != nil {
+		return -1, fmt.Errorf("mount API configure devpts newinstance: %w", err)
+	}
+	if err := unix.FsconfigSetString(context, "ptmxmode", "0666"); err != nil {
+		return -1, fmt.Errorf("mount API configure devpts ptmxmode: %w", err)
+	}
+	if err := unix.FsconfigCreate(context); err != nil {
+		return -1, fmt.Errorf("mount API create devpts: %w", err)
+	}
+	mountFD, err := unix.Fsmount(context, unix.FSMOUNT_CLOEXEC, 0)
+	if err != nil {
+		return -1, fmt.Errorf("mount API fsmount devpts: %w", err)
 	}
 	return mountFD, nil
 }

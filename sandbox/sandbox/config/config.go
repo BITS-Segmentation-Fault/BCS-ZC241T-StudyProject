@@ -281,6 +281,9 @@ func validateBindPolicies(mounts []BindMount, dnsConfigured bool) error {
 	cleaned := make([]string, len(mounts))
 	for i, mount := range mounts {
 		cleaned[i] = filepath.Clean(mount.ContainerPath)
+		if cleaned[i] == "/dev" || strings.HasPrefix(cleaned[i], "/dev/") {
+			return fmt.Errorf("value_error: bind_mount target %q is reserved for the device filesystem", mount.ContainerPath)
+		}
 		if cleaned[i] == "/proc" || strings.HasPrefix(cleaned[i], "/proc/") {
 			return fmt.Errorf("value_error: bind_mount target %q is reserved for proc", mount.ContainerPath)
 		}

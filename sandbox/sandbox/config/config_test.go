@@ -78,6 +78,8 @@ func TestValidatePolicies(t *testing.T) {
 			c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/mnt"}, {HostPath: "/var", ContainerPath: "/mnt/sub"}}
 		}, "overlapping"},
 		{"proc bind target", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/proc/log"}} }, "reserved for proc"},
+		{"device bind target", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/dev"}} }, "reserved for the device filesystem"},
+		{"device child bind target", func(c *Config) { c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/dev/input"}} }, "reserved for the device filesystem"},
 		{"DNS bind target", func(c *Config) {
 			c.DNSServers = []string{"1.1.1.1"}
 			c.BindMounts = []BindMount{{HostPath: "/tmp", ContainerPath: "/etc/resolv.conf"}}

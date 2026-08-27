@@ -70,6 +70,9 @@ func TestDescriptorBoundMountAssembly(t *testing.T) {
 	} else if string(got) != "original\n" {
 		t.Fatalf("source rootfs resolv.conf changed: %q", got)
 	}
+	if _, err := os.Lstat(filepath.Join(root, "rootfs", "dev")); !os.IsNotExist(err) {
+		t.Fatalf("source rootfs /dev changed: %v", err)
+	}
 }
 
 func TestDescriptorBoundSourceReplacement(t *testing.T) {
@@ -201,7 +204,10 @@ func requireMountNamespace(t *testing.T, needProc bool) {
 	}
 	userNamespace := exec.Command("unshare", "-Ur", "true")
 	if output, err := userNamespace.CombinedOutput(); err != nil {
-		skipMountNamespace(t, fmt.Sprintf("user namespace preflight failed: %v\n%s", err, output))
+		if isUnavailableUserNamespaceError(output) {
+			skipMountNamespace(t, fmt.Sprintf("user namespace prerequisite unavailable: %v\n%s", err, output))
+		}
+		t.Fatalf("user namespace preflight failed: %v\n%s", err, output)
 	}
 	command := exec.Command("unshare", "-Urnm", "--", os.Args[0], "-test.run=^TestMountNamespaceProbe$")
 	probeProc := "0"
@@ -216,6 +222,16 @@ func requireMountNamespace(t *testing.T, needProc bool) {
 		}
 		t.Fatalf("mount API probe failed: %v\n%s", err, output)
 	}
+}
+
+func isUnavailableUserNamespaceError(output []byte) bool {
+	message := strings.ToLower(string(output))
+	for _, phrase := range []string{"operation not permitted", "permission denied", "read-only file system", "function not implemented"} {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 func isUnavailableMountProbeError(err error) bool {
@@ -350,10 +366,180 @@ func runDescriptorBoundMountAssembly(root string) error {
 	if _, err := os.ReadFile("/proc/self/status"); err != nil {
 		return fmt.Errorf("proc attachment failed: %w", err)
 	}
+	if err := verifyPrivateDeviceFilesystem(); err != nil {
+		return err
+	}
 	for _, path := range []string{"/mnt/new", "/mnt/nested/new"} {
 		if err := os.WriteFile(path, []byte("forbidden"), 0600); err == nil {
 			return fmt.Errorf("read-only recursive bind allowed write to %s", path)
 		}
+	}
+	return nil
+}
+
+func verifyPrivateDeviceFilesystem() error {
+	for _, device := range []struct {
+		name  string
+		major uint32
+		minor uint32
+	}{
+		{name: "null", major: 1, minor: 3},
+		{name: "zero", major: 1, minor: 5},
+		{name: "full", major: 1, minor: 7},
+		{name: "random", major: 1, minor: 8},
+		{name: "urandom", major: 1, minor: 9},
+	} {
+		if err := requireDevicePath(filepath.Join("/dev", device.name), device.major, device.minor); err != nil {
+			return err
+		}
+	}
+	if err := verifyNull(); err != nil {
+		return err
+	}
+	if err := verifyZero(); err != nil {
+		return err
+	}
+	if err := verifyFull(); err != nil {
+		return err
+	}
+	if err := verifyRandom(); err != nil {
+		return err
+	}
+	for name, want := range map[string]string{
+		"fd":     "/proc/self/fd",
+		"stdin":  "/proc/self/fd/0",
+		"stdout": "/proc/self/fd/1",
+		"stderr": "/proc/self/fd/2",
+		"ptmx":   "pts/ptmx",
+	} {
+		got, err := os.Readlink(filepath.Join("/dev", name))
+		if err != nil {
+			return fmt.Errorf("readlink /dev/%s: %w", name, err)
+		}
+		if got != want {
+			return fmt.Errorf("/dev/%s -> %q, want %q", name, got, want)
+		}
+	}
+	shm, err := os.Stat("/dev/shm")
+	if err != nil {
+		return fmt.Errorf("stat /dev/shm: %w", err)
+	}
+	if !shm.IsDir() || shm.Mode().Perm() != 0777 || shm.Mode()&os.ModeSticky == 0 {
+		return fmt.Errorf("/dev/shm mode = %v, want directory 01777", shm.Mode())
+	}
+	pts, err := os.Stat("/dev/pts")
+	if err != nil || !pts.IsDir() {
+		return fmt.Errorf("stat /dev/pts: %v, want directory", err)
+	}
+	if err := requireDevicePath("/dev/pts/ptmx", 5, 2); err != nil {
+		return err
+	}
+	pty, err := unix.Open("/dev/ptmx", unix.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open private /dev/ptmx: %w", err)
+	}
+	if _, err := unix.IoctlGetInt(pty, unix.TIOCGPTN); err != nil {
+		_ = unix.Close(pty)
+		return fmt.Errorf("private /dev/ptmx did not allocate a PTY: %w", err)
+	}
+	if err := unix.Close(pty); err != nil {
+		return fmt.Errorf("close private /dev/ptmx: %w", err)
+	}
+	for _, name := range []string{"tty", "console", "kmsg", "sda", "vda", "nvme0n1"} {
+		if _, err := os.Lstat(filepath.Join("/dev", name)); err == nil {
+			return fmt.Errorf("unrelated /dev/%s is visible", name)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("check private /dev/%s: %w", name, err)
+		}
+	}
+	entries, err := os.ReadDir("/dev")
+	if err != nil {
+		return fmt.Errorf("read private /dev: %w", err)
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("stat private /dev/%s: %w", entry.Name(), err)
+		}
+		if info.Mode()&os.ModeDevice != 0 && info.Mode()&os.ModeCharDevice == 0 {
+			return fmt.Errorf("block device /dev/%s is visible", entry.Name())
+		}
+	}
+	return nil
+}
+
+func verifyNull() error {
+	fd, err := unix.Open("/dev/null", unix.O_RDWR|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open /dev/null: %w", err)
+	}
+	defer unix.Close(fd)
+	buffer := make([]byte, 1)
+	if n, err := unix.Read(fd, buffer); err != nil || n != 0 {
+		return fmt.Errorf("read /dev/null = %d, %v; want EOF", n, err)
+	}
+	if n, err := unix.Write(fd, []byte("null")); err != nil || n != 4 {
+		return fmt.Errorf("write /dev/null = %d, %v; want successful write", n, err)
+	}
+	return nil
+}
+
+func verifyZero() error {
+	fd, err := unix.Open("/dev/zero", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open /dev/zero: %w", err)
+	}
+	defer unix.Close(fd)
+	buffer := make([]byte, 32)
+	n, err := unix.Read(fd, buffer)
+	if err != nil || n != len(buffer) {
+		return fmt.Errorf("read /dev/zero = %d, %v; want %d zero bytes", n, err, len(buffer))
+	}
+	for _, value := range buffer {
+		if value != 0 {
+			return fmt.Errorf("read /dev/zero returned nonzero data")
+		}
+	}
+	return nil
+}
+
+func verifyFull() error {
+	fd, err := unix.Open("/dev/full", unix.O_WRONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open /dev/full: %w", err)
+	}
+	defer unix.Close(fd)
+	if _, err := unix.Write(fd, []byte("full")); !errors.Is(err, unix.ENOSPC) {
+		return fmt.Errorf("write /dev/full = %v; want ENOSPC", err)
+	}
+	return nil
+}
+
+func verifyRandom() error {
+	fd, err := unix.Open("/dev/urandom", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open /dev/urandom: %w", err)
+	}
+	defer unix.Close(fd)
+	buffer := make([]byte, 32)
+	if n, err := unix.Read(fd, buffer); err != nil || n != len(buffer) {
+		return fmt.Errorf("read /dev/urandom = %d, %v; want %d bytes", n, err, len(buffer))
+	}
+	return nil
+}
+
+func requireDevicePath(path string, major, minor uint32) error {
+	fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer unix.Close(fd)
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil {
+		return fmt.Errorf("stat %s: %w", path, err)
+	}
+	if stat.Mode&unix.S_IFMT != unix.S_IFCHR || unix.Major(stat.Rdev) != major || unix.Minor(stat.Rdev) != minor {
+		return fmt.Errorf("%s = mode %#o device %d:%d, want character device %d:%d", path, stat.Mode&unix.S_IFMT, unix.Major(stat.Rdev), unix.Minor(stat.Rdev), major, minor)
 	}
 	return nil
 }
