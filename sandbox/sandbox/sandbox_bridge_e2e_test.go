@@ -172,7 +172,7 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 	}
 	firewallAfter := normalizeFirewallSnapshot(bridgeCommandOutputPath(t, firewallSave))
 	if strings.Contains(string(firewallAfter), "study-project-sandbox") || string(firewallBefore) != string(firewallAfter) {
-		t.Fatalf("owned firewall state was not cleaned up")
+		t.Fatalf("owned firewall state was not cleaned up\nbefore=%q after=%q", firewallBefore, firewallAfter)
 	}
 
 	normal := newSandboxConfig(rootfs, "bridge", "/bin/probe", "exit", "0")
@@ -195,7 +195,7 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 	})
 	firewallAfterNormal := normalizeFirewallSnapshot(bridgeCommandOutputPath(t, firewallSave))
 	if strings.Contains(string(firewallAfterNormal), "study-project-sandbox") || string(firewallBefore) != string(firewallAfterNormal) {
-		t.Fatalf("owned firewall state remained after normal lifecycle")
+		t.Fatalf("owned firewall state remained after normal lifecycle\nbefore=%q after=%q", firewallBefore, firewallAfterNormal)
 	}
 }
 
@@ -366,51 +366,254 @@ func bridgeFirewallPoliciesPresent(data []byte, links []string, expectations []b
 	return true
 }
 
-func firewallRuleLines(data []byte) [][]string {
-	var rules [][]string
+type parsedFirewallRule struct {
+	table           string
+	chain           string
+	inputInterface  string
+	outputInterface string
+	source          string
+	destination     string
+	comment         string
+	connectionState map[string]bool
+	jump            string
+	rejectWith      string
+	outputNegated   bool
+	invalid         bool
+}
+
+func firewallRuleLines(data []byte) []parsedFirewallRule {
+	var rules []parsedFirewallRule
+	table := ""
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) > 0 && fields[0] == "-A" {
-			rules = append(rules, fields)
+		if len(fields) == 1 && strings.HasPrefix(fields[0], "*") {
+			table = strings.TrimPrefix(fields[0], "*")
+			continue
 		}
+		if len(fields) < 2 || fields[0] != "-A" {
+			continue
+		}
+		rule := parsedFirewallRule{table: table, chain: fields[1], connectionState: make(map[string]bool)}
+		negated := false
+		seen := make(map[string]bool)
+		markSeen := func(attribute string) bool {
+			if seen[attribute] {
+				rule.invalid = true
+				return false
+			}
+			seen[attribute] = true
+			return true
+		}
+		for index := 2; index < len(fields); index++ {
+			switch fields[index] {
+			case "!":
+				if negated {
+					rule.invalid = true
+				}
+				negated = true
+			case "-i", "--in-interface":
+				if index+1 >= len(fields) || negated || !markSeen("input-interface") {
+					rule.invalid = true
+					continue
+				}
+				rule.inputInterface = fields[index+1]
+				index++
+			case "-o", "--out-interface":
+				if index+1 >= len(fields) || !markSeen("output-interface") {
+					rule.invalid = true
+					continue
+				}
+				rule.outputInterface = fields[index+1]
+				rule.outputNegated = negated
+				negated = false
+				index++
+			case "-s", "--source":
+				if index+1 >= len(fields) || negated || !markSeen("source") {
+					rule.invalid = true
+					continue
+				}
+				rule.source = fields[index+1]
+				index++
+			case "-d", "--destination":
+				if index+1 >= len(fields) || negated || !markSeen("destination") {
+					rule.invalid = true
+					continue
+				}
+				rule.destination = fields[index+1]
+				index++
+			case "-m":
+				if index+1 >= len(fields) || (fields[index+1] != "comment" && fields[index+1] != "conntrack" && fields[index+1] != "state") || negated {
+					rule.invalid = true
+					continue
+				}
+				index++
+			case "--comment":
+				if index+1 >= len(fields) || negated || !markSeen("comment") {
+					rule.invalid = true
+					continue
+				}
+				rule.comment = fields[index+1]
+				index++
+			case "--ctstate", "--state":
+				if index+1 >= len(fields) || negated || !markSeen("connection-state") {
+					rule.invalid = true
+					continue
+				}
+				for _, state := range strings.Split(fields[index+1], ",") {
+					if state == "" {
+						rule.invalid = true
+						continue
+					}
+					rule.connectionState[strings.ToUpper(state)] = true
+				}
+				index++
+			case "-j", "--jump":
+				if index+1 >= len(fields) || negated || !markSeen("jump") {
+					rule.invalid = true
+					continue
+				}
+				rule.jump = fields[index+1]
+				index++
+			case "--reject-with":
+				if index+1 >= len(fields) || negated || !markSeen("reject-with") {
+					rule.invalid = true
+					continue
+				}
+				rule.rejectWith = fields[index+1]
+				index++
+			default:
+				rule.invalid = true
+			}
+		}
+		if negated {
+			rule.invalid = true
+		}
+		rules = append(rules, rule)
 	}
 	return rules
 }
 
-func findBridgeFirewallIdentity(rules [][]string, subnet string) (string, string, bool) {
+func findBridgeFirewallIdentity(rules []parsedFirewallRule, subnet string) (string, string, bool) {
 	for _, rule := range rules {
-		if len(rule) == 13 && rule[0] == "-A" && rule[1] == "POSTROUTING" &&
-			rule[2] == "-s" && rule[3] == subnet && rule[4] == "!" && rule[5] == "-o" &&
-			rule[7] == "-m" && rule[8] == "comment" && rule[9] == "--comment" &&
-			rule[11] == "-j" && rule[12] == "MASQUERADE" {
-			return rule[6], rule[10], true
+		want := parsedFirewallRule{
+			table:           "nat",
+			chain:           "POSTROUTING",
+			outputInterface: rule.outputInterface,
+			source:          subnet,
+			comment:         rule.comment,
+			jump:            "MASQUERADE",
+			outputNegated:   true,
+			connectionState: make(map[string]bool),
+		}
+		if rule.comment != "" && firewallRuleMatches(rule, want) {
+			return rule.outputInterface, rule.comment, true
 		}
 	}
 	return "", "", false
 }
 
-func expectedBridgeFirewallRules(bridge, subnet, label string) [][]string {
-	comment := []string{"-m", "comment", "--comment", label}
-	withComment := func(base []string, target string) []string {
-		return append(append(append([]string(nil), base...), comment...), "-j", target)
-	}
-	return [][]string{
-		withComment([]string{"-A", "FORWARD", "-i", bridge}, "ACCEPT"),
-		withComment([]string{"-A", "FORWARD", "-o", bridge, "-m", "conntrack", "--ctstate", "NEW"}, "REJECT"),
-		withComment([]string{"-A", "FORWARD", "-o", bridge, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED"}, "ACCEPT"),
-		withComment([]string{"-A", "INPUT", "-i", bridge}, "REJECT"),
-		withComment([]string{"-A", "FORWARD", "-i", bridge, "-d", "169.254.0.0/16"}, "REJECT"),
-		withComment([]string{"-A", "POSTROUTING", "-s", subnet, "!", "-o", bridge}, "MASQUERADE"),
+func expectedBridgeFirewallRules(bridge, subnet, label string) []parsedFirewallRule {
+	return []parsedFirewallRule{
+		{table: "filter", chain: "FORWARD", inputInterface: bridge, comment: label, jump: "ACCEPT", connectionState: make(map[string]bool)},
+		{table: "filter", chain: "FORWARD", outputInterface: bridge, comment: label, jump: "REJECT", connectionState: map[string]bool{"NEW": true}},
+		{table: "filter", chain: "FORWARD", outputInterface: bridge, comment: label, jump: "ACCEPT", connectionState: map[string]bool{"ESTABLISHED": true, "RELATED": true}},
+		{table: "filter", chain: "INPUT", inputInterface: bridge, comment: label, jump: "REJECT", connectionState: make(map[string]bool)},
+		{table: "filter", chain: "FORWARD", inputInterface: bridge, destination: "169.254.0.0/16", comment: label, jump: "REJECT", connectionState: make(map[string]bool)},
+		{table: "nat", chain: "POSTROUTING", outputInterface: bridge, outputNegated: true, source: subnet, comment: label, jump: "MASQUERADE", connectionState: make(map[string]bool)},
 	}
 }
 
-func hasFirewallRule(rules [][]string, want []string) bool {
+func firewallRuleMatches(got, want parsedFirewallRule) bool {
+	if got.invalid || got.table != want.table || got.chain != want.chain ||
+		got.inputInterface != want.inputInterface || got.outputInterface != want.outputInterface ||
+		got.source != want.source || got.destination != want.destination || got.comment != want.comment ||
+		got.jump != want.jump || got.outputNegated != want.outputNegated ||
+		!equalFirewallStateSets(got.connectionState, want.connectionState) {
+		return false
+	}
+	if got.rejectWith != "" && (got.jump != "REJECT" || got.rejectWith != "icmp-port-unreachable") {
+		return false
+	}
+	return true
+}
+
+func equalFirewallStateSets(left, right map[string]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for state := range left {
+		if !right[state] {
+			return false
+		}
+	}
+	return true
+}
+
+func hasFirewallRule(rules []parsedFirewallRule, want parsedFirewallRule) bool {
 	for _, rule := range rules {
-		if strings.Join(rule, " ") == strings.Join(want, " ") {
+		if firewallRuleMatches(rule, want) {
 			return true
 		}
 	}
 	return false
+}
+
+func TestBridgeFirewallSemanticMatching(t *testing.T) {
+	const (
+		bridge = "sb0"
+		subnet = "10.0.0.0/24"
+		label  = "study-project-sandbox-test"
+	)
+	expectations := []bridgeFirewallExpectation{{subnet: subnet}}
+	canonical := fmt.Sprintf(`*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+-A FORWARD -i %s -m comment --comment %s -j ACCEPT
+-A FORWARD -o %s -m conntrack --ctstate NEW -m comment --comment %s -j REJECT
+-A FORWARD -o %s -m conntrack --ctstate ESTABLISHED,RELATED -m comment --comment %s -j ACCEPT
+-A INPUT -i %s -m comment --comment %s -j REJECT
+-A FORWARD -i %s -d 169.254.0.0/16 -m comment --comment %s -j REJECT
+COMMIT
+*nat
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -s %s ! -o %s -m comment --comment %s -j MASQUERADE
+COMMIT
+`, bridge, label, bridge, label, bridge, label, bridge, label, bridge, label, subnet, bridge, label)
+	fedora := fmt.Sprintf(`*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+-A FORWARD -m comment --comment %s -i %s -j ACCEPT
+-A FORWARD -m comment --comment %s -o %s -m conntrack --ctstate NEW -j REJECT --reject-with icmp-port-unreachable
+-A FORWARD -o %s -m comment --comment %s -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+-A INPUT -m comment --comment %s -i %s -j REJECT --reject-with icmp-port-unreachable
+-A FORWARD -d 169.254.0.0/16 -i %s -m comment --comment %s -j REJECT --reject-with icmp-port-unreachable
+COMMIT
+*nat
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -s %s ! -o %s -m comment --comment %s -j MASQUERADE
+COMMIT
+`, label, bridge, label, bridge, bridge, label, label, bridge, bridge, label, subnet, bridge, label)
+	cases := []struct {
+		name  string
+		data  string
+		links []string
+		want  bool
+	}{
+		{name: "canonical ordering", data: canonical, links: []string{bridge}, want: true},
+		{name: "fedora nft ordering", data: fedora, links: []string{bridge}, want: true},
+		{name: "missing rule", data: strings.Replace(canonical, fmt.Sprintf("-A INPUT -i %s -m comment --comment %s -j REJECT\n", bridge, label), "", 1), links: []string{bridge}, want: false},
+		{name: "wrong interface", data: strings.Replace(canonical, "-A FORWARD -i sb0 -m comment", "-A FORWARD -i sb9 -m comment", 1), links: []string{bridge}, want: false},
+		{name: "wrong subnet", data: strings.Replace(canonical, "-s 10.0.0.0/24", "-s 10.0.1.0/24", 1), links: []string{bridge}, want: false},
+		{name: "missing negation", data: strings.Replace(canonical, "! -o sb0", "-o sb0", 1), links: []string{bridge}, want: false},
+		{name: "incorrect state", data: strings.Replace(canonical, "--ctstate NEW", "--ctstate ESTABLISHED", 1), links: []string{bridge}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := bridgeFirewallPoliciesPresent([]byte(tc.data), tc.links, expectations); got != tc.want {
+				t.Fatalf("bridgeFirewallPoliciesPresent() = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 func parseLinkNames(data []byte) []string {
@@ -459,9 +662,7 @@ func assertBridgePayload(t *testing.T, output, ipv4, gateway string) {
 	if line := findLine(output, "ipv6="); line != "ipv6=none" {
 		t.Fatalf("IPv6 state = %q, want none\n%s", line, output)
 	}
-	if identity := findLine(output, "identity="); identity != "identity=uid=0 gid=0 pid=2 ppid=1 cwd=/work" {
-		t.Fatalf("payload identity = %q, want namespace PID 2 and PPID 1\n%s", identity, output)
-	}
+	requireSupervisedPayloadIdentity(t, output, "/work")
 }
 
 func bridgePrerequisiteUnavailable(err error) bool {
@@ -518,14 +719,46 @@ func TestBridgeUnavailableReason(t *testing.T) {
 
 func normalizeFirewallSnapshot(data []byte) []byte {
 	var lines []string
+	var table []string
+	insideTable := false
+	tableHasRule := false
+	flushTable := func() {
+		if insideTable && tableHasRule {
+			lines = append(lines, table...)
+		}
+		table = nil
+		insideTable = false
+		tableHasRule = false
+	}
 	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "# Generated by ") || strings.HasPrefix(line, "# Completed on ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 1 && strings.HasPrefix(fields[0], "*") {
+			flushTable()
+			insideTable = true
+			table = append(table, line)
+			continue
+		}
 		if start := strings.IndexByte(line, '['); start >= 0 {
 			if end := strings.IndexByte(line[start:], ']'); end >= 0 {
 				line = line[:start] + line[start+end+1:]
 			}
 		}
-		lines = append(lines, line)
+		if insideTable {
+			table = append(table, line)
+			if len(fields) > 0 && fields[0] == "-A" {
+				tableHasRule = true
+			}
+			if line == "COMMIT" {
+				flushTable()
+			}
+		} else {
+			lines = append(lines, line)
+		}
 	}
+	flushTable()
 	return []byte(strings.Join(lines, "\n"))
 }
 
