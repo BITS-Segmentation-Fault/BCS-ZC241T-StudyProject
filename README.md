@@ -174,8 +174,9 @@ failures, are written to standard error.
 
 Interactive mode is also available in YAML with `interactive: true`. It
 requires stdin to be a terminal; redirected stdout is allowed, but payload
-stdout and stderr are merged by the PTY. The host terminal is restored on
-return, `SIGWINCH` resizes the PTY, and an unsuccessful resize keeps the last
+stdout uses the PTY while stderr remains a separate stream; separate streams do
+not guarantee cross-stream ordering. The host terminal is restored on return,
+`SIGWINCH` resizes the PTY, and an unsuccessful resize keeps the last
 known size. An explicit `TERM` in the configuration is preserved; otherwise a
 short conservative host `TERM` value is copied, with invalid or missing values
 replaced by `TERM=dumb`. `COLORTERM` is not copied by this policy. Ordinary

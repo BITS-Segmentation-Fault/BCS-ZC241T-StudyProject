@@ -87,7 +87,7 @@ func (r *progressRenderer) finish() {
 	if r == nil || !r.tty || !r.active || r.out == nil {
 		return
 	}
-	fmt.Fprint(r.out, "\r\033[K\n")
+	fmt.Fprint(r.out, "\r\033[K")
 	r.active = false
 }
 

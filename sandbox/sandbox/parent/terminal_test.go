@@ -30,11 +30,11 @@ func TestTerminalHelper(t *testing.T) {
 	role := os.Getenv("SANDBOX_TERMINAL_ROLE")
 	switch role {
 	case "stdio":
-		if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) || !term.IsTerminal(int(os.Stderr.Fd())) {
-			fmt.Fprintln(os.Stderr, "stdio descriptor is not a terminal")
+		if !term.IsTerminal(int(os.Stdin.Fd())) || !term.IsTerminal(int(os.Stdout.Fd())) {
+			fmt.Fprintln(os.Stderr, "stdio input/output descriptor is not a terminal")
 			os.Exit(20)
 		}
-		fmt.Fprintln(os.Stdout, "READY 1 1 1")
+		fmt.Fprintln(os.Stdout, "READY 1 1 0")
 		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 		if err != nil {
 			os.Exit(21)
@@ -79,6 +79,7 @@ type nestedTerminalSession struct {
 	hostPTY  *os.File
 	hostTTY  *os.File
 	output   *os.File
+	stderr   *os.File
 
 	originalState *unix.Termios
 
@@ -104,9 +105,17 @@ func startNestedTerminal(t *testing.T, role string, rows, cols uint16, beforeSta
 		hostTTY.Close()
 		t.Fatal(err)
 	}
-	terminal, err := newInteractiveTerminal(hostTTY, output)
+	stderr, err := os.CreateTemp(t.TempDir(), "terminal-stderr-")
 	if err != nil {
 		output.Close()
+		hostPTY.Close()
+		hostTTY.Close()
+		t.Fatal(err)
+	}
+	terminal, err := newInteractiveTerminal(hostTTY, output, stderr)
+	if err != nil {
+		output.Close()
+		stderr.Close()
 		hostPTY.Close()
 		hostTTY.Close()
 		t.Fatal(err)
@@ -114,6 +123,7 @@ func startNestedTerminal(t *testing.T, role string, rows, cols uint16, beforeSta
 	if len(beforeStart) > 0 {
 		if err := beforeStart[0](hostPTY); err != nil {
 			output.Close()
+			stderr.Close()
 			hostPTY.Close()
 			hostTTY.Close()
 			t.Fatal(err)
@@ -123,11 +133,12 @@ func startNestedTerminal(t *testing.T, role string, rows, cols uint16, beforeSta
 	command.Env = append(os.Environ(), "SANDBOX_TERMINAL_HELPER=1", "SANDBOX_TERMINAL_ROLE="+role)
 	if err := terminal.start(command, &syscall.SysProcAttr{Setsid: true, Setctty: true, Ctty: 0}); err != nil {
 		output.Close()
+		stderr.Close()
 		hostPTY.Close()
 		hostTTY.Close()
 		t.Fatal(err)
 	}
-	session := &nestedTerminalSession{terminal: terminal, command: command, hostPTY: hostPTY, hostTTY: hostTTY, output: output}
+	session := &nestedTerminalSession{terminal: terminal, command: command, hostPTY: hostPTY, hostTTY: hostTTY, output: output, stderr: stderr}
 	t.Cleanup(func() { session.cleanup(t) })
 	session.originalState, err = unix.IoctlGetTermios(int(hostTTY.Fd()), unix.TCGETS)
 	if err != nil {
@@ -161,6 +172,9 @@ func (s *nestedTerminalSession) closeResources() error {
 		}
 		if err := s.output.Close(); err != nil {
 			s.cleanupErr = errors.Join(s.cleanupErr, fmt.Errorf("close terminal output: %w", err))
+		}
+		if err := s.stderr.Close(); err != nil {
+			s.cleanupErr = errors.Join(s.cleanupErr, fmt.Errorf("close terminal stderr: %w", err))
 		}
 		if err := s.hostPTY.Close(); err != nil {
 			s.cleanupErr = errors.Join(s.cleanupErr, fmt.Errorf("close host PTY: %w", err))
@@ -232,21 +246,44 @@ func waitForOutput(t *testing.T, path, want string) {
 	t.Fatalf("output %q did not contain %q", path, want)
 }
 
-func TestInteractiveTerminalForwardsInputAndMergesOutputInOrder(t *testing.T) {
+func TestInteractiveTerminalForwardsInputAndPreservesOutputStreams(t *testing.T) {
 	session := startNestedTerminal(t, "stdio", 24, 80)
-	waitForOutput(t, session.output.Name(), "READY 1 1 1")
+	waitForOutput(t, session.output.Name(), "READY 1 1 0")
 	if _, err := session.hostPTY.Write([]byte("hello\n")); err != nil {
 		t.Fatal(err)
 	}
 	waitForOutput(t, session.output.Name(), "OUT hello")
 	output, status := session.finish(t)
+	stderr := readOutput(t, session.stderr.Name())
 	if status != 0 {
-		t.Fatalf("helper status = %d, want 0; output=%q", status, output)
+		t.Fatalf("helper status = %d, want 0; stdout=%q stderr=%q", status, output, stderr)
 	}
-	outIndex := strings.Index(output, "OUT hello")
-	errIndex := strings.Index(output, "ERR hello")
-	if outIndex < 0 || errIndex < 0 || outIndex >= errIndex {
-		t.Fatalf("merged output ordering = %q, want OUT before ERR", output)
+	if !strings.Contains(output, "OUT hello") || strings.Contains(output, "ERR hello") {
+		t.Fatalf("stdout = %q, want only stdout marker", output)
+	}
+	if !strings.Contains(stderr, "ERR hello") || strings.Contains(stderr, "OUT hello") {
+		t.Fatalf("stderr = %q, want only stderr marker", stderr)
+	}
+}
+
+func TestInteractiveTerminalRawModePreservesOutputAndRestoresState(t *testing.T) {
+	session := startNestedTerminal(t, "size", 24, 80)
+	raw, err := unix.IoctlGetTermios(int(session.hostTTY.Fd()), unix.TCGETS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.Iflag&(unix.IGNBRK|unix.BRKINT|unix.PARMRK|unix.ISTRIP|unix.INLCR|unix.IGNCR|unix.ICRNL|unix.IXON) != 0 {
+		t.Fatalf("raw input flags = %#x, expected input processing disabled", raw.Iflag)
+	}
+	if raw.Lflag&(unix.ECHO|unix.ECHONL|unix.ICANON|unix.ISIG|unix.IEXTEN) != 0 {
+		t.Fatalf("raw local flags = %#x, expected canonical input, echo, and signals disabled", raw.Lflag)
+	}
+	if raw.Oflag != session.originalState.Oflag {
+		t.Fatalf("raw output flags = %#x, want original %#x", raw.Oflag, session.originalState.Oflag)
+	}
+	_, status := session.finish(t)
+	if status != 0 {
+		t.Fatalf("size helper status = %d, want 0", status)
 	}
 }
 
@@ -308,6 +345,53 @@ func TestCopyTerminalOutputTreatsPTYEIOAsEOF(t *testing.T) {
 	}
 }
 
+func TestInteractiveTerminalReportsRawSetupAndRestoreErrors(t *testing.T) {
+	hostPTY, hostTTY, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := newInteractiveTerminal(hostTTY, os.Stdout, os.Stderr)
+	if err != nil {
+		hostTTY.Close()
+		hostPTY.Close()
+		t.Fatal(err)
+	}
+	if err := hostTTY.Close(); err != nil {
+		hostPTY.Close()
+		t.Fatal(err)
+	}
+	if err := terminal.makeRaw(); err == nil || !strings.Contains(err.Error(), "terminal state") {
+		t.Fatalf("makeRaw() error = %v, want setup error", err)
+	}
+	if terminal.state != nil {
+		t.Fatal("failed raw-mode setup retained cleanup state")
+	}
+	if err := hostPTY.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer master.Close()
+	restoring, err := newInteractiveTerminal(slave, os.Stdout, os.Stderr)
+	if err != nil {
+		slave.Close()
+		t.Fatal(err)
+	}
+	if err := restoring.makeRaw(); err != nil {
+		slave.Close()
+		t.Fatal(err)
+	}
+	if err := slave.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoring.close(); err == nil || !strings.Contains(err.Error(), "restore terminal state") {
+		t.Fatalf("close() error = %v, want restoration error", err)
+	}
+}
+
 type eioReader struct{}
 
 func (eioReader) Read([]byte) (int, error) { return 0, syscall.EIO }
@@ -319,7 +403,7 @@ func TestInteractiveTerminalRequiresStdinTerminal(t *testing.T) {
 	}
 	defer reader.Close()
 	defer writer.Close()
-	if _, err := newInteractiveTerminal(reader, os.Stdout); err == nil || !strings.Contains(err.Error(), "stdin to be a terminal") {
+	if _, err := newInteractiveTerminal(reader, os.Stdout, os.Stderr); err == nil || !strings.Contains(err.Error(), "stdin to be a terminal") {
 		t.Fatalf("newInteractiveTerminal() error = %v", err)
 	}
 }

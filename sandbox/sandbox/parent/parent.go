@@ -33,7 +33,7 @@ func Parent(cfg config.Config) (result int) {
 	var hasConfiguredTERM bool
 	if cfg.Interactive {
 		var err error
-		terminal, err = newInteractiveTerminal(os.Stdin, os.Stdout)
+		terminal, err = newInteractiveTerminal(os.Stdin, os.Stdout, os.Stderr)
 		if err != nil {
 			log.Printf("[PRE-FLIGHT ERROR] %v", err)
 			return 1

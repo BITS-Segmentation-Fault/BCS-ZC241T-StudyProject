@@ -45,6 +45,12 @@ func TestProgressRendererSilenceAndTTYOutput(t *testing.T) {
 	if output.Len() != 0 {
 		t.Fatalf("non-TTY progress output = %q, want empty", output.String())
 	}
+	output.Reset()
+	inactive := &progressRenderer{out: &output, tty: true}
+	inactive.finish()
+	if output.Len() != 0 {
+		t.Fatalf("inactive progress output = %q, want empty", output.String())
+	}
 
 	for _, test := range []struct {
 		name    string
@@ -68,8 +74,11 @@ func TestProgressRendererSilenceAndTTYOutput(t *testing.T) {
 			if test.current == 50 && !strings.Contains(output.String(), "50%") {
 				t.Fatalf("TTY progress output = %q, want percentage", output.String())
 			}
-			if !strings.Contains(output.String(), "\n") {
-				t.Fatalf("TTY progress output = %q, want line finish", output.String())
+			if strings.Contains(output.String(), "\n") {
+				t.Fatalf("TTY progress output = %q, want no newline", output.String())
+			}
+			if !strings.HasSuffix(output.String(), "\r\033[K") {
+				t.Fatalf("TTY progress output = %q, want active line erased", output.String())
 			}
 		})
 	}

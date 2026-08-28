@@ -30,6 +30,7 @@ var terminalNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,31}$
 type interactiveTerminal struct {
 	stdin  *os.File
 	stdout *os.File
+	stderr *os.File
 	size   *pty.Winsize
 
 	master     *os.File
@@ -43,18 +44,19 @@ type interactiveTerminal struct {
 	resizeWait sync.WaitGroup
 }
 
-func newInteractiveTerminal(stdin, stdout *os.File) (*interactiveTerminal, error) {
+func newInteractiveTerminal(stdin, stdout, stderr *os.File) (*interactiveTerminal, error) {
 	if stdin == nil || !term.IsTerminal(int(stdin.Fd())) {
 		return nil, errors.New("interactive mode requires stdin to be a terminal")
 	}
 	if stdout == nil || !term.IsTerminal(int(stdout.Fd())) {
-		log.Printf("[TERMINAL] stdout is not a terminal; continuing with merged terminal output")
+		log.Printf("[TERMINAL] stdout is not a terminal; continuing with separate stderr")
 	}
-	return &interactiveTerminal{stdin: stdin, stdout: stdout}, nil
+	return &interactiveTerminal{stdin: stdin, stdout: stdout, stderr: stderr}, nil
 }
 
 func (t *interactiveTerminal) start(cmd *exec.Cmd, attrs *syscall.SysProcAttr) error {
 	size := currentTerminalSize(t.stdin)
+	cmd.Stderr = t.stderr
 	master, err := pty.StartWithAttrs(cmd, size, attrs)
 	if err != nil {
 		return err
@@ -134,11 +136,44 @@ func copyTerminalOutput(dst io.Writer, src io.Reader) error {
 }
 
 func (t *interactiveTerminal) makeRaw() error {
-	state, err := term.MakeRaw(int(t.stdin.Fd()))
+	fd := int(t.stdin.Fd())
+	original, err := term.GetState(fd)
 	if err != nil {
-		return fmt.Errorf("set terminal raw mode: %w", err)
+		return fmt.Errorf("read terminal state: %w", err)
 	}
-	t.state = state
+	originalTermios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return fmt.Errorf("read terminal flags: %w", err)
+	}
+	if _, err := term.MakeRaw(fd); err != nil {
+		return errors.Join(
+			fmt.Errorf("set terminal raw mode: %w", err),
+			restoreTerminalState(fd, original),
+		)
+	}
+	rawTermios, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return errors.Join(
+			fmt.Errorf("read raw terminal flags: %w", err),
+			restoreTerminalState(fd, original),
+		)
+	}
+	rawTermios.Oflag = originalTermios.Oflag
+	if err := unix.IoctlSetTermios(fd, unix.TCSETS, rawTermios); err != nil {
+		return errors.Join(
+			fmt.Errorf("restore terminal output flags: %w", err),
+			restoreTerminalState(fd, original),
+		)
+	}
+	// Do not publish cleanup state until raw mode and output flags are both set.
+	t.state = original
+	return nil
+}
+
+func restoreTerminalState(fd int, state *term.State) error {
+	if err := term.Restore(fd, state); err != nil {
+		return fmt.Errorf("restore terminal state: %w", err)
+	}
 	return nil
 }
 
@@ -190,8 +225,8 @@ func (t *interactiveTerminal) close() error {
 		}
 	}
 	if t.state != nil {
-		if err := term.Restore(int(t.stdin.Fd()), t.state); err != nil {
-			result = errors.Join(result, fmt.Errorf("restore terminal mode: %w", err))
+		if err := restoreTerminalState(int(t.stdin.Fd()), t.state); err != nil {
+			result = errors.Join(result, err)
 		}
 	}
 	return result
