@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,6 +62,7 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 	probe := probeTestBinary(t)
 	rootfs := makeProbeRootfs(t, probe)
 	linksBefore := bridgeCommandOutput(t, "ip", "-o", "link", "show")
+	routesBefore := bridgeCommandOutput(t, "ip", "-j", "-4", "route", "show", "table", "all")
 	firewallSave := trustedBridgeTool(t, "iptables-save")
 	firewallBefore := normalizeFirewallSnapshot(bridgeCommandOutputPath(t, firewallSave))
 	first := newSandboxConfig(rootfs, "bridge", "/bin/probe", "inspect", "10s")
@@ -139,29 +141,125 @@ func TestSandboxPrivilegedBridgeLifecycle(t *testing.T) {
 		cleanup()
 		t.Fatalf("bridge links = %v, want two owned bridges", bridges)
 	}
+	routesDuring := bridgeCommandOutput(t, "ip", "-j", "-4", "route", "show", "table", "all")
+	assertBridgeRoutes(t, routesDuring, bridges, map[string]string{
+		"10.0.100.0/24": "10.0.100.1",
+		"10.0.101.0/24": "10.0.101.1",
+	})
 	_ = firstCommand.Process.Signal(os.Interrupt)
 	_ = secondCommand.Process.Signal(os.Interrupt)
 	firstErr := firstCommand.Wait()
 	firstWaited = true
 	secondErr := secondCommand.Wait()
 	secondWaited = true
-	if firstErr == nil || secondErr == nil {
-		t.Fatalf("bridge sandboxes did not terminate: first=%v second=%v\nfirst stdout=%s\nsecond stdout=%s", firstErr, secondErr, firstCapture.output(), secondCapture.output())
-	}
+	requireBridgeExitStatus(t, "first signalled sandbox", firstErr, 128+int(syscall.SIGINT), firstCapture.output(), firstStderr.String())
+	requireBridgeExitStatus(t, "second signalled sandbox", secondErr, 128+int(syscall.SIGINT), secondCapture.output(), secondStderr.String())
+	assertNoBridgeCleanupDiagnostic(t, "first signalled sandbox", firstStderr.String())
+	assertNoBridgeCleanupDiagnostic(t, "second signalled sandbox", secondStderr.String())
 	assertBridgePayload(t, firstCapture.output(), "10.0.100.2/24", "10.0.100.1")
 	assertBridgePayload(t, secondCapture.output(), "10.0.101.2/24", "10.0.101.1")
 	linksAfter := bridgeCommandOutput(t, "ip", "-o", "link", "show")
 	if string(linksBefore) != string(linksAfter) {
 		t.Fatalf("host links changed across bridge lifecycle:\nbefore=%safter=%s", linksBefore, linksAfter)
 	}
+	routesAfter := bridgeCommandOutput(t, "ip", "-j", "-4", "route", "show", "table", "all")
+	assertNoBridgeRoutes(t, routesAfter, map[string]string{
+		"10.0.100.0/24": "10.0.100.1",
+		"10.0.101.0/24": "10.0.101.1",
+	})
+	if string(routesBefore) == string(routesDuring) {
+		t.Fatalf("bridge routes did not appear during setup")
+	}
 	firewallAfter := normalizeFirewallSnapshot(bridgeCommandOutputPath(t, firewallSave))
 	if strings.Contains(string(firewallAfter), "study-project-sandbox") || string(firewallBefore) != string(firewallAfter) {
 		t.Fatalf("owned firewall state was not cleaned up")
+	}
+
+	normal := newSandboxConfig(rootfs, "bridge", "/bin/probe", "exit", "0")
+	normalCommand := exec.Command(sandbox, "--config", writeSandboxConfig(t, normal))
+	var normalStdout, normalStderr bytes.Buffer
+	normalCommand.Stdout = &normalStdout
+	normalCommand.Stderr = &normalStderr
+	if err := normalCommand.Run(); err != nil {
+		t.Fatalf("normally exiting bridge sandbox failed: %v\nstdout=%s\nstderr=%s", err, normalStdout.String(), normalStderr.String())
+	}
+	assertNoBridgeCleanupDiagnostic(t, "normally exiting sandbox", normalStderr.String())
+	linksAfterNormal := bridgeCommandOutput(t, "ip", "-o", "link", "show")
+	if string(linksBefore) != string(linksAfterNormal) {
+		t.Fatalf("host links changed after normal bridge lifecycle:\nbefore=%safter=%s", linksBefore, linksAfterNormal)
+	}
+	routesAfterNormal := bridgeCommandOutput(t, "ip", "-j", "-4", "route", "show", "table", "all")
+	assertNoBridgeRoutes(t, routesAfterNormal, map[string]string{
+		"10.0.100.0/24": "10.0.100.1",
+		"10.0.101.0/24": "10.0.101.1",
+	})
+	firewallAfterNormal := normalizeFirewallSnapshot(bridgeCommandOutputPath(t, firewallSave))
+	if strings.Contains(string(firewallAfterNormal), "study-project-sandbox") || string(firewallBefore) != string(firewallAfterNormal) {
+		t.Fatalf("owned firewall state remained after normal lifecycle")
 	}
 }
 
 type bridgeFirewallExpectation struct {
 	subnet string
+}
+
+type bridgeRoute struct {
+	Destination string `json:"dst"`
+	Device      string `json:"dev"`
+	Protocol    string `json:"protocol"`
+	Source      string `json:"prefsrc"`
+}
+
+func assertBridgeRoutes(t *testing.T, data []byte, bridges []string, expected map[string]string) {
+	t.Helper()
+	var routes []bridgeRoute
+	if err := json.Unmarshal(data, &routes); err != nil {
+		t.Fatalf("decode bridge routes: %v", err)
+	}
+	owned := make(map[string]bool, len(bridges))
+	for _, bridge := range bridges {
+		owned[bridge] = true
+	}
+	for subnet, gateway := range expected {
+		found := false
+		for _, route := range routes {
+			if route.Destination == subnet && owned[route.Device] && route.Protocol == "static" && route.Source == gateway {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("route %s via %s was not installed on an owned bridge: %s", subnet, gateway, data)
+		}
+	}
+}
+
+func assertNoBridgeRoutes(t *testing.T, data []byte, expected map[string]string) {
+	t.Helper()
+	var routes []bridgeRoute
+	if err := json.Unmarshal(data, &routes); err != nil {
+		t.Fatalf("decode final bridge routes: %v", err)
+	}
+	for _, route := range routes {
+		if _, ok := expected[route.Destination]; ok && strings.HasPrefix(route.Device, "sb") {
+			t.Fatalf("owned bridge route remained after teardown: %s", data)
+		}
+	}
+}
+
+func requireBridgeExitStatus(t *testing.T, name string, err error, want int, stdout, stderr string) {
+	t.Helper()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != want {
+		t.Fatalf("%s status = %v, want %d\nstdout=%s\nstderr=%s", name, err, want, stdout, stderr)
+	}
+}
+
+func assertNoBridgeCleanupDiagnostic(t *testing.T, name, stderr string) {
+	t.Helper()
+	if strings.Contains(strings.ToLower(stderr), "bridge cleanup") {
+		t.Fatalf("%s reported bridge cleanup failure: %s", name, stderr)
+	}
 }
 
 type bridgeProbeResult struct {

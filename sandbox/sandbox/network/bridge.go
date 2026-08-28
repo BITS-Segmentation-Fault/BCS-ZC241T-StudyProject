@@ -200,27 +200,6 @@ func (m *bridgeManager) setupParentBridge(cfg BridgeConfig) (*BridgeState, error
 	}
 	prefixBits, _ := netipPrefix(cfg.Subnet)
 	configuredPrefix, _ := netip.ParsePrefix(cfg.Subnet)
-	if err := m.ops.netlink.AddrAdd(bridge, cfg.GatewayIP+"/"+strconv.Itoa(prefixBits)); err != nil {
-		return nil, setupFailure(fmt.Errorf("failed to assign bridge IP: %w", err), state)
-	}
-	if m.ops.routeList != nil {
-		routes, err := m.ops.routeList()
-		if err != nil {
-			return nil, setupFailure(fmt.Errorf("inspect IPv4 routes after bridge address assignment: %w", err), state)
-		}
-		connected := false
-		for _, route := range routes {
-			if route.prefix == configuredPrefix && route.device == bridge {
-				connected = true
-			}
-			if route.prefix.Overlaps(configuredPrefix) && route.device != bridge {
-				return nil, setupFailure(fmt.Errorf("bridge subnet %q overlaps route %q on %s after address assignment", cfg.Subnet, route.prefix, route.device), state)
-			}
-		}
-		if !connected {
-			return nil, setupFailure(fmt.Errorf("connected route %q is missing on bridge %q after address assignment", configuredPrefix, bridge), state)
-		}
-	}
 	if err := m.ops.netlink.LinkSetMTU(bridge, cfg.MTU); err != nil {
 		return nil, setupFailure(fmt.Errorf("failed to set bridge MTU: %w", err), state)
 	}
@@ -232,6 +211,28 @@ func (m *bridgeManager) setupParentBridge(cfg BridgeConfig) (*BridgeState, error
 	}
 	if err := m.ops.netlink.LinkSetUp(hostVeth); err != nil {
 		return nil, setupFailure(fmt.Errorf("failed to bring up host veth: %w", err), state)
+	}
+	if err := m.ops.runIP("addr", "add", cfg.GatewayIP+"/"+strconv.Itoa(prefixBits), "dev", bridge, "noprefixroute"); err != nil {
+		return nil, setupFailure(fmt.Errorf("failed to assign bridge IP: %w", err), state)
+	}
+	if err := m.ops.runIP("route", "add", cfg.Subnet, "dev", bridge, "src", cfg.GatewayIP, "proto", "static"); err != nil {
+		return nil, setupFailure(fmt.Errorf("failed to add bridge route: %w", err), state)
+	}
+	routes, err := m.ops.routeList()
+	if err != nil {
+		return nil, setupFailure(fmt.Errorf("inspect IPv4 routes after bridge route assignment: %w", err), state)
+	}
+	ownedRoute := false
+	for _, route := range routes {
+		if route.prefix == configuredPrefix && route.device == bridge {
+			ownedRoute = true
+		}
+		if route.device != bridge && route.prefix.Overlaps(configuredPrefix) {
+			return nil, setupFailure(fmt.Errorf("bridge subnet %q overlaps route %q on %s after route assignment", cfg.Subnet, route.prefix, route.device), state)
+		}
+	}
+	if !ownedRoute {
+		return nil, setupFailure(fmt.Errorf("bridge route %q is missing on bridge %q after route assignment", configuredPrefix, bridge), state)
 	}
 	return state, nil
 }
@@ -306,20 +307,38 @@ func (state *BridgeState) cleanup() error {
 		}
 	}
 	if state.ownedVeth {
-		if err := state.manager.ops.netlink.VethDelete(state.hostVeth); err != nil {
+		if err := deleteOwnedLink(state.manager.ops.netlink, state.hostVeth, state.manager.ops.netlink.VethDelete); err != nil {
 			errs = append(errs, fmt.Errorf("delete veth %q: %w", state.hostVeth, err))
-		} else if err == nil {
+		} else {
 			state.ownedVeth = false
 		}
 	}
 	if state.ownedBridge {
-		if err := state.manager.ops.netlink.BridgeDel(state.bridge); err != nil {
+		if err := deleteOwnedLink(state.manager.ops.netlink, state.bridge, state.manager.ops.netlink.BridgeDel); err != nil {
 			errs = append(errs, fmt.Errorf("delete bridge %q: %w", state.bridge, err))
 		} else {
 			state.ownedBridge = false
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func deleteOwnedLink(ops netlinkOps, name string, deleteLink func(string) error) error {
+	if err := deleteLink(name); err == nil {
+		return nil
+	} else {
+		deleteErr := err
+		names, inspectErr := ops.LinkNames()
+		if inspectErr != nil {
+			return errors.Join(deleteErr, fmt.Errorf("inspect link %q after deletion failed: %w", name, inspectErr))
+		}
+		for _, candidate := range names {
+			if candidate == name {
+				return deleteErr
+			}
+		}
+		return nil
+	}
 }
 
 func setupFailure(err error, state *BridgeState) error { return errors.Join(err, state.cleanup()) }

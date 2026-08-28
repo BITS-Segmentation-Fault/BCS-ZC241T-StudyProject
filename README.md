@@ -143,7 +143,16 @@ the sandbox exits and are never written back to the rootfs source.
 Bridge mode additionally requires effective `CAP_NET_ADMIN`, trusted `ip` and
 `iptables` commands, and enabled IPv4 forwarding. It creates uniquely named
 links and owned firewall rules and rolls
-back only resources created by that run. CPU limits from 1 through 100 require
+back only resources created by that run.
+Run bridge mode through an absolute installed path with `sudo`, for example:
+
+```text
+sudo /absolute/path/to/sandbox --network-mode=bridge ... -- command
+```
+IPv4 forwarding must be enabled. Do not apply file capabilities such as
+`setcap cap_net_admin+ep` to the self-reexecuting sandbox binary.
+
+CPU limits from 1 through 100 require
 a delegated CPU controller in a writable cgroup-v2 hierarchy; `0` disables
 the CPU limit. If that controller is unavailable, configure
 `cpu_limit_percent: 0` or provide the required delegation.

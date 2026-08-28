@@ -7,29 +7,69 @@ import (
 	"net/netip"
 	"os"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
 
 type mockNetlinkOps struct {
-	ops        []string
-	fail       string
-	interfaces []string
+	ops             []string
+	fail            string
+	failPrefix      string
+	interfaces      []string
+	links           map[string]bool
+	vethPeers       map[string]string
+	inspectErr      error
+	removeOnFailure map[string]bool
 }
 
 func (m *mockNetlinkOps) record(operation string) error {
 	m.ops = append(m.ops, operation)
-	if m.fail == operation {
+	if m.fail == operation || (m.failPrefix != "" && strings.HasPrefix(operation, m.failPrefix)) {
 		return errors.New("simulated failure")
 	}
 	return nil
 }
-func (m *mockNetlinkOps) BridgeAdd(name string) error { return m.record("BridgeAdd " + name) }
-func (m *mockNetlinkOps) BridgeDel(name string) error { return m.record("BridgeDel " + name) }
-func (m *mockNetlinkOps) VethCreate(name, peer string) error {
-	return m.record("VethCreate " + name + " " + peer)
+func (m *mockNetlinkOps) BridgeAdd(name string) error {
+	err := m.record("BridgeAdd " + name)
+	if err == nil {
+		m.addLink(name)
+	}
+	return err
 }
-func (m *mockNetlinkOps) VethDelete(name string) error { return m.record("VethDelete " + name) }
+func (m *mockNetlinkOps) BridgeDel(name string) error {
+	err := m.record("BridgeDel " + name)
+	if err == nil && !m.links[name] {
+		err = errors.New("link is absent")
+	}
+	if err == nil || m.removeAfterFailure(name) {
+		m.removeLink(name)
+	}
+	return err
+}
+func (m *mockNetlinkOps) VethCreate(name, peer string) error {
+	err := m.record("VethCreate " + name + " " + peer)
+	if err == nil {
+		m.addLink(name)
+		m.addLink(peer)
+		if m.vethPeers == nil {
+			m.vethPeers = make(map[string]string)
+		}
+		m.vethPeers[name] = peer
+		m.vethPeers[peer] = name
+	}
+	return err
+}
+func (m *mockNetlinkOps) VethDelete(name string) error {
+	err := m.record("VethDelete " + name)
+	if err == nil && !m.links[name] {
+		err = errors.New("link is absent")
+	}
+	if err == nil || m.removeAfterFailure(name) {
+		m.removeVethPair(name)
+	}
+	return err
+}
 func (m *mockNetlinkOps) LinkSetMaster(link, master string) error {
 	return m.record("LinkSetMaster " + link + " " + master)
 }
@@ -47,10 +87,44 @@ func (m *mockNetlinkOps) AddrAdd(iface, ip string) error {
 	return m.record("AddrAdd " + iface + " " + ip)
 }
 func (m *mockNetlinkOps) LinkNames() ([]string, error) {
-	return append([]string(nil), m.interfaces...), nil
+	if m.inspectErr != nil {
+		return nil, m.inspectErr
+	}
+	if m.links == nil {
+		return append([]string(nil), m.interfaces...), nil
+	}
+	result := make([]string, 0, len(m.links))
+	for name := range m.links {
+		result = append(result, name)
+	}
+	sort.Strings(result)
+	return result, nil
 }
 func (m *mockNetlinkOps) DisableIPv6() error {
 	return m.record("DisableIPv6")
+}
+
+func (m *mockNetlinkOps) addLink(name string) {
+	if m.links == nil {
+		m.links = make(map[string]bool)
+	}
+	m.links[name] = true
+}
+
+func (m *mockNetlinkOps) removeLink(name string) {
+	delete(m.links, name)
+}
+
+func (m *mockNetlinkOps) removeVethPair(name string) {
+	peer := m.vethPeers[name]
+	m.removeLink(name)
+	m.removeLink(peer)
+	delete(m.vethPeers, name)
+	delete(m.vethPeers, peer)
+}
+
+func (m *mockNetlinkOps) removeAfterFailure(name string) bool {
+	return m.removeOnFailure != nil && m.removeOnFailure[name]
 }
 
 type mockFirewallOps struct {
@@ -86,7 +160,16 @@ func mustPrefix(value string) netip.Prefix {
 }
 
 func testOperations(mock *mockNetlinkOps) operations {
-	return operations{netlink: mock, runIP: func(args ...string) error { return nil }, routeList: mockRouteList(mock, nil), firewall: &mockFirewallOps{}}
+	return operations{
+		netlink:   mock,
+		runIP:     testRunIP(mock),
+		routeList: mockRouteList(mock, nil),
+		firewall:  &mockFirewallOps{},
+	}
+}
+
+func testRunIP(mock *mockNetlinkOps) func(...string) error {
+	return func(args ...string) error { return mock.record("IP " + strings.Join(args, " ")) }
 }
 
 func mockRouteList(mock *mockNetlinkOps, preflight []routeInfo) func() ([]routeInfo, error) {
@@ -98,12 +181,68 @@ func mockRouteList(mock *mockNetlinkOps, preflight []routeInfo) func() ([]routeI
 		}
 		for _, operation := range mock.ops {
 			fields := strings.Fields(operation)
-			if len(fields) >= 3 && fields[0] == "AddrAdd" {
-				prefix, _ := netip.ParsePrefix(DefaultBridgeConfig().Subnet)
-				return []routeInfo{{prefix: prefix, device: fields[1]}}, nil
+			if len(fields) >= 6 && fields[0] == "IP" && fields[1] == "route" && fields[2] == "add" {
+				prefix, _ := netip.ParsePrefix(fields[3])
+				return []routeInfo{{prefix: prefix, device: fields[5]}}, nil
 			}
 		}
 		return nil, nil
+	}
+}
+
+func TestSetupParentBridgeProvisionsAddressAndRouteAfterLinksAreUp(t *testing.T) {
+	mock := &mockNetlinkOps{}
+	state, err := setupParentBridgeWithOps(testBridgeConfig(), testOperations(mock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := state.cleanup(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	address := "IP addr add 10.0.100.1/24 dev " + state.bridge + " noprefixroute"
+	route := "IP route add 10.0.100.0/24 dev " + state.bridge + " src 10.0.100.1 proto static"
+	if !containsOperation(mock.ops, address) || !containsOperation(mock.ops, route) {
+		t.Fatalf("operations = %v", mock.ops)
+	}
+	if operationIndex(mock.ops, "LinkSetUp "+state.hostVeth) > operationIndex(mock.ops, address) || operationIndex(mock.ops, "LinkSetUp "+state.bridge) > operationIndex(mock.ops, address) {
+		t.Fatalf("address was provisioned before links were up: %v", mock.ops)
+	}
+	if operationIndex(mock.ops, address) > operationIndex(mock.ops, route) {
+		t.Fatalf("route was provisioned before address: %v", mock.ops)
+	}
+}
+
+func TestBridgeRouteFailureRollsBackOwnedLinks(t *testing.T) {
+	mock := &mockNetlinkOps{failPrefix: "IP route add "}
+	state, err := setupParentBridgeWithOps(testBridgeConfig(), testOperations(mock))
+	if err == nil || state != nil {
+		t.Fatalf("route failure was accepted: state=%v err=%v", state, err)
+	}
+	if !containsOperationPrefix(mock.ops, "VethDelete ") || !containsOperationPrefix(mock.ops, "BridgeDel ") {
+		t.Fatalf("route failure did not roll back links: %v", mock.ops)
+	}
+}
+
+func TestMissingBridgeRouteAfterExplicitAddRollsBack(t *testing.T) {
+	mock := &mockNetlinkOps{}
+	calls := 0
+	ops := testOperations(mock)
+	ops.routeList = func() ([]routeInfo, error) {
+		calls++
+		if calls == 1 {
+			return nil, nil
+		}
+		return nil, nil
+	}
+	state, err := setupParentBridgeWithOps(testBridgeConfig(), ops)
+	if err == nil || state != nil {
+		t.Fatalf("missing route was accepted: state=%v err=%v", state, err)
+	}
+	if !containsOperationPrefix(mock.ops, "VethDelete ") || !containsOperationPrefix(mock.ops, "BridgeDel ") {
+		t.Fatalf("missing route did not roll back links: %v", mock.ops)
 	}
 }
 
@@ -222,7 +361,7 @@ func TestFirewallRulesDenyBeforeAllow(t *testing.T) {
 func TestFirewallSetupRollsBackReverseOrder(t *testing.T) {
 	mock := &mockNetlinkOps{}
 	firewall := &mockFirewallOps{failAt: 3}
-	ops := operations{netlink: mock, runIP: func(args ...string) error { return nil }, routeList: mockRouteList(mock, nil), firewall: firewall}
+	ops := operations{netlink: mock, runIP: testRunIP(mock), routeList: mockRouteList(mock, nil), firewall: firewall}
 	state, err := setupParentBridgeWithOps(testBridgeConfig(), ops)
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +380,7 @@ func TestFirewallSetupRollsBackReverseOrder(t *testing.T) {
 func TestFirewallRollbackRetainsFailedRulesForRetry(t *testing.T) {
 	mock := &mockNetlinkOps{}
 	firewall := &mockFirewallOps{failAt: 3, deleteFail: true}
-	ops := operations{netlink: mock, runIP: func(args ...string) error { return nil }, routeList: mockRouteList(mock, nil), firewall: firewall}
+	ops := operations{netlink: mock, runIP: testRunIP(mock), routeList: mockRouteList(mock, nil), firewall: firewall}
 	state, err := setupParentBridgeWithOps(testBridgeConfig(), ops)
 	if err != nil {
 		t.Fatal(err)
@@ -283,7 +422,7 @@ func TestFirewallSetupAndTeardownAreSerialized(t *testing.T) {
 	firewall := &mockFirewallOps{}
 	state, err := setupParentBridgeWithOps(testBridgeConfig(), operations{
 		netlink:   mock,
-		runIP:     func(args ...string) error { return nil },
+		runIP:     testRunIP(mock),
 		routeList: mockRouteList(mock, nil),
 		firewall:  firewall,
 	})
@@ -356,6 +495,7 @@ func TestBridgeRejectsPostAddressRouteOverlapAndRollsBack(t *testing.T) {
 		prefix string
 	}{
 		{name: "identical", prefix: "10.0.100.0/24"},
+		{name: "broader", prefix: "10.0.0.0/16"},
 		{name: "narrower", prefix: "10.0.100.0/25"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -375,7 +515,7 @@ func TestBridgeRejectsPostAddressRouteOverlapAndRollsBack(t *testing.T) {
 				t.Fatalf("overlapping postcondition route accepted: state=%v err=%v", state, err)
 			}
 			if calls != 2 {
-				t.Fatalf("route inspections = %d, want preflight and post-AddrAdd", calls)
+				t.Fatalf("route inspections = %d, want preflight and post-route", calls)
 			}
 			if countPrefix(mock.ops, "VethDelete ") == 0 || countPrefix(mock.ops, "BridgeDel ") == 0 {
 				t.Fatalf("setup failure did not roll back links: %v", mock.ops)
@@ -407,6 +547,91 @@ func TestBridgeCleanupRetriesOnlyFailedDeletes(t *testing.T) {
 	}
 }
 
+func TestBridgeCleanupAcceptsKernelRemovedVethAndIsIdempotent(t *testing.T) {
+	mock := &mockNetlinkOps{}
+	state, err := setupParentBridgeWithOps(testBridgeConfig(), testOperations(mock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.removeVethPair(state.hostVeth)
+	if err := state.cleanup(); err != nil {
+		t.Fatalf("cleanup after child namespace teardown = %v", err)
+	}
+	if state.ownedVeth || state.ownedBridge || len(mock.links) != 0 {
+		t.Fatalf("cleanup retained resources: veth=%v bridge=%v links=%v", state.ownedVeth, state.ownedBridge, mock.links)
+	}
+	operations := len(mock.ops)
+	if err := state.cleanup(); err != nil {
+		t.Fatalf("second cleanup = %v", err)
+	}
+	if len(mock.ops) != operations {
+		t.Fatalf("second cleanup performed operations: %v", mock.ops[operations:])
+	}
+}
+
+func TestBridgeCleanupAcceptsExternallyRemovedBridge(t *testing.T) {
+	mock := &mockNetlinkOps{}
+	state, err := setupParentBridgeWithOps(testBridgeConfig(), testOperations(mock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.removeLink(state.bridge)
+	if err := state.cleanup(); err != nil {
+		t.Fatalf("cleanup after bridge removal = %v", err)
+	}
+	if state.ownedVeth || state.ownedBridge {
+		t.Fatalf("cleanup retained ownership: veth=%v bridge=%v", state.ownedVeth, state.ownedBridge)
+	}
+}
+
+func TestBridgeCleanupRetainsLinkOwnershipAfterDeleteFailure(t *testing.T) {
+	mock := &mockNetlinkOps{}
+	state, err := setupParentBridgeWithOps(testBridgeConfig(), testOperations(mock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.fail = "VethDelete " + state.hostVeth
+	if err := state.cleanup(); err == nil {
+		t.Fatal("cleanup unexpectedly succeeded")
+	}
+	if !state.ownedVeth || state.ownedBridge {
+		t.Fatalf("ownership after genuine veth failure: veth=%v bridge=%v", state.ownedVeth, state.ownedBridge)
+	}
+}
+
+func TestBridgeCleanupAcceptsFailedDeleteAfterLinkDisappears(t *testing.T) {
+	mock := &mockNetlinkOps{}
+	state, err := setupParentBridgeWithOps(testBridgeConfig(), testOperations(mock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.fail = "VethDelete " + state.hostVeth
+	mock.removeOnFailure = map[string]bool{state.hostVeth: true}
+	if err := state.cleanup(); err != nil {
+		t.Fatalf("cleanup after confirmed veth disappearance = %v", err)
+	}
+	if state.ownedVeth || state.ownedBridge {
+		t.Fatalf("cleanup retained ownership: veth=%v bridge=%v", state.ownedVeth, state.ownedBridge)
+	}
+}
+
+func TestBridgeCleanupRetainsOwnershipWhenLinkInspectionFails(t *testing.T) {
+	mock := &mockNetlinkOps{}
+	state, err := setupParentBridgeWithOps(testBridgeConfig(), testOperations(mock))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.fail = "VethDelete " + state.hostVeth
+	mock.inspectErr = errors.New("link inspection failed")
+	err = state.cleanup()
+	if err == nil || !strings.Contains(err.Error(), "simulated failure") || !strings.Contains(err.Error(), "link inspection failed") {
+		t.Fatalf("cleanup error = %v, want deletion and inspection errors", err)
+	}
+	if !state.ownedVeth {
+		t.Fatal("cleanup cleared ownership after failed inspection")
+	}
+}
+
 func containsOperation(ops []string, want string) bool {
 	for _, op := range ops {
 		if op == want {
@@ -414,6 +639,24 @@ func containsOperation(ops []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func containsOperationPrefix(ops []string, prefix string) bool {
+	for _, op := range ops {
+		if strings.HasPrefix(op, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func operationIndex(ops []string, want string) int {
+	for index, op := range ops {
+		if op == want {
+			return index
+		}
+	}
+	return -1
 }
 
 func countPrefix(ops []string, prefix string) int {
