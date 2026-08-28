@@ -1,205 +1,352 @@
-# BCS ZC241T StudyProject
+# Linux Sandbox User Manual
 
-## Go sandbox
+Linux applications normally execute with the same permissions as the user who launched them. A command-line application can therefore access the user's files, environment, and network unless those resources are explicitly restricted.
 
-The active sandbox is the standalone Go module in `sandbox/sandbox`. Bazel is
-an integration and packaging layer; ordinary Go tooling is the authoritative
-build and test workflow.
+This project provides a lightweight, rootless sandbox runtime for Linux command-line and headless applications. A user can launch a command directly using command-line options or provide a readable, declarative YAML policy. The restrictive defaults provide isolated networking, a read-only managed root filesystem, a seccomp denylist and removal of all Linux capabilities. More permissive behavior, such as host networking or writable host files, must be explicitly configured.
 
-From the module directory:
+This sandbox does not require a background daemon, made a setuid-root executable, or privileged access (normally). Only bridge mode requires extra privileges due to its nature.
+
+## What the sandbox offers
+
+- An isolated process, mount, identity and hostname environment
+- No network access by default
+- A read-only root filesystem by default
+- Explicit, read-only host file sharing by default
+- Capability removal and configurable seccomp filtering
+- Verified managed and remote root filesystems
+- Optional interactive terminal support
+- Optional CPU, memory, process and per-file size limits
+- Linux `amd64` and `arm64` support
+
+This is a Linux process sandbox, not a virtual machine. It shares the host kernel and depends on the host allowing unprivileged user namespaces.
+
+## Requirements
+
+- Linux on `amd64` or `arm64`
+- Go 1.26.3 or later to build from source
+- Unprivileged user namespaces enabled for rootless execution
+
+Bazel 9.1.0 is optional and is only needed for repository-wide builds, tests and packaging.
+
+## Build
 
 ```bash
 cd sandbox/sandbox
-go build ./...
-go test ./...
+go build -o sandbox .
+```
+
+The executable is created in the current directory with the name `sandbox`.
+
+Optionally install it in `/usr/local/bin/` (requires root, but sandbox program does not require root):
+
+```bash
+sudo install -m 0755 sandbox /usr/local/bin/sandbox
+```
+
+## Quick start
+
+Run a command with the default isolated policy:
+
+```bash
+sandbox -- /bin/echo "hello from the sandbox"
+```
+
+If no root filesystem is configured, the first run downloads a pinned Alpine minirootfs, verifies its SHA-256 digest and caches it. Later runs reuse the cache.
+
+Run an interactive shell:
+
+```bash
+sandbox --interactive -- /bin/sh -i
+```
+
+Run a repeatable YAML policy:
+
+```bash
+sandbox --config ./sandbox.yaml
+```
+
+Options must appear before the payload command. Use `--` to separate sandbox options from payload arguments.
+
+## Command-line reference
+
+The sandbox has two command forms:
+
+```text
+sandbox [OPTIONS] -- COMMAND [ARGUMENT...]
+sandbox --config FILE [OVERRIDE OPTIONS]
+```
+
+In the first form, `COMMAND` is required. In the second form, the YAML file must contain a `command` field (note that a second command cannot be supplied on the command line).
+
+All options must appear before the payload command. Use `--` to end sandbox option parsing, especially when the payload has arguments beginning with `-`.
+
+| Option | Purpose | Default |
+|---|---|---|
+| `--config FILE` | Load one declarative YAML policy file. | No file |
+| `--network-mode MODE` | Select `none`, `host`, or `bridge` networking. | `none` |
+| `--bridge-subnet CIDR` | Set the canonical IPv4 subnet used by bridge mode. | `10.0.100.0/24` |
+| `--bridge-gateway ADDRESS` | Set the host-side gateway address within the bridge subnet. | `10.0.100.1` |
+| `--bridge-container-ip ADDRESS` | Set the payload-side address within the bridge subnet. | `10.0.100.2` |
+| `--env-whitelist NAME[,NAME...]` | Copy only the named variables from the host environment. | Empty |
+| `--file-size-limit MIB` | Limit the size of each file created or extended by the payload. | `100` MiB |
+| `--interactive`, `-i` | Allocate an interactive pseudo-terminal. | `false` |
+| `--` | End sandbox option parsing. | - |
+
+### `--config FILE`
+
+Loads a YAML configuration. Unknown fields, trailing YAML documents and configuration files larger than 1 MiB are rejected. `rootfs_source` and bind-mount host paths are resolved relative to the directory containing the YAML file.
+
+Values explicitly supplied as CLI override options take precedence over the same values loaded from YAML.
+
+### `--network-mode MODE`
+
+Selects one of the following modes:
+
+- `none` creates an isolated network namespace with initialized loopback, no host interface and no default route.
+- `host` shares the host network namespace.
+- `bridge` creates an isolated veth/bridge network and owned firewall policy.
+
+### Bridge options
+
+`--bridge-subnet`, `--bridge-gateway` and `--bridge-container-ip` configure bridge mode. The subnet must be canonical IPv4 CIDR, must leave usable host addresses, and must contain distinct gateway and payload addresses. These values do not take any effect without passing `--network-mode=bridge`.
+
+Bridge mode requires effective `CAP_NET_ADMIN`, IPv4 forwarding, trusted `ip` and `iptables` executables and a subnet that does not conflict with host routes.
+
+### `--env-whitelist NAME[,NAME...]`
+
+Copies the named host variables when they exist. Names must be valid environment keys. Explicit YAML `env_vars` entries take precedence when the same key appears in both places. The remaining host environment variables are not inherited.
+
+Example:
+
+```bash
+sandbox --env-whitelist=LANG,LC_ALL -- /bin/sh -c 'env'
+```
+
+### `--file-size-limit MIB`
+
+Applies `RLIMIT_FSIZE` to each file created or extended by the payload. This is a per-file limit, not a total storage quota. Zero disables the configured limit, but a stricter limit may be inherited from the host.
+
+### `--interactive` and `-i`
+
+Allocates a pseudo-terminal, forwards terminal input and signals, tracks terminal resizing and restores the host terminal when the payload exits. Standard input must be a terminal.
+
+Passing `--interactive` or `-i` enables the feature. It can also be written as `--interactive=true`, `--interactive=false`, `-i=true` or `-i=false`. Use ordinary non-interactive mode for pipelined I/O.
+
+An explicit `TERM` in YAML `env_vars` is preserved. Otherwise, a short valid host `TERM` is copied; a missing or invalid value becomes `TERM=dumb`. `COLORTERM` is not copied automatically.
+
+## Example policy
+
+```yaml
+command: ["/bin/sh", "-c", "cat /work/input/message.txt"]
+working_dir: /work
+network_mode: none
+read_only_root: true
+
+bind_mounts:
+  - host_path: ./input
+    container_path: /work/input
+
+blocked_syscalls: ["mount", "reboot", "ptrace", "swapon", "syslog"]
+blocked_syscall_action: kill
+drop_capabilities: ["ALL"]
+```
+
+Host paths are resolved relative to the YAML file's directory. This makes a policy behave consistently regardless of the directory from which it is launched.
+
+Unknown YAML fields, duplicate values and trailing YAML documents are rejected.
+
+## Sharing files
+
+Host paths are visible only when declared as bind mounts. They are read-only unless `writable: true` is explicitly set:
+
+```yaml
+bind_mounts:
+  - host_path: ./input
+    container_path: /work/input
+  - host_path: ./output
+    container_path: /work/output
+    writable: true
+```
+
+Writes to a writable bind mount affect the host path. Other root filesystem writes, when enabled for a local root, use a private per-run overlay and do not modify the source rootfs.
+
+## Networking
+
+The supported modes are:
+
+- `none` - private network namespace with loopback only; this is the default.
+- `host` - share the host network namespace.
+- `bridge` - create a veth/bridge network and owned firewall policy.
+
+Examples:
+
+```bash
+sandbox --network-mode=none -- /bin/echo isolated
+sandbox --network-mode=host -- /bin/echo host-network-enabled
+```
+
+Bridge mode is not rootless. It requires effective `CAP_NET_ADMIN`, trusted `ip` and `iptables` tools, IPv4 forwarding and a non-conflicting subnet.
+
+## Environment and resource controls
+
+The host environment variables are not inherited by default. Exact value in the policy file must be provided:
+
+```yaml
+env_vars:
+  - PATH=/bin:/usr/bin
+  - APP_MODE=production
+env_whitelist: ["LANG"]
+```
+
+Optional limits:
+
+```yaml
+file_size_limit_mb: 100
+cpu_limit_percent: 50
+memory_limit_gb: 1
+max_processes: 64
+```
+
+The file-size setting is a per-file `RLIMIT_FSIZE`, not a disk quota. CPU, memory, and process limits require writable delegated cgroup-v2 controllers. The sandbox fails if it cannot configure the requested limits.
+
+## Root filesystem choices
+
+### Managed root
+
+Leave `rootfs_source` and `remote_rootfs` unset to use the default Alpine mini-root.
+
+### Local root
+
+```yaml
+rootfs_source: ./rootfs
+```
+
+The directory must already contain the payload and its runtime dependencies.
+
+### Remote root
+
+```yaml
+read_only_root: true
+remote_rootfs:
+  url: https://example.com/rootfs-amd64.tar.zst
+  architecture: amd64
+  archive_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  max_extracted_size_mb: 2048
+```
+
+Remote URLs must use HTTPS and the policy must include the SHA-256 digest. Downloads are verified before extraction and cached after successful validation.
+
+## Complete YAML reference
+
+The following policy contains every supported YAML option. `rootfs_source` and `remote_rootfs` are alternatives, so the local rootfs line is commented out. The values demonstrate syntax and are not a recommendation for options to use:
+
+```yaml
+command: ["/bin/sh", "-c", "exec /work/program --verbose"]
+interactive: false
+
+env_vars:
+  - PATH=/bin:/usr/bin
+  - APP_MODE=demo
+env_whitelist: ["LANG", "TERM"]
+
+working_dir: /work
+read_only_root: true
+# rootfs_source: ./rootfs
+remote_rootfs:
+  url: https://example.com/rootfs-amd64.tar.zst
+  architecture: amd64
+  archive_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+  max_extracted_size_mb: 2048
+  max_file_size_mb: 256
+  max_entries: 200000
+
+bind_mounts:
+  - host_path: ./program
+    container_path: /work/program
+  - host_path: ./output
+    container_path: /work/output
+    writable: true
+
+network_mode: none
+bridge:
+  subnet: 10.0.100.0/24
+  gateway_ip: 10.0.100.1
+  container_ip: 10.0.100.2
+  mtu: 1500
+dns_servers: ["1.1.1.1", "9.9.9.9"]
+
+blocked_syscall_action: kill
+blocked_syscalls: ["mount", "reboot", "ptrace", "swapon", "syslog"]
+drop_capabilities: ["ALL"]
+
+file_size_limit_mb: 100
+cpu_limit_percent: 0
+memory_limit_gb: 0
+max_processes: 0
+```
+
+## Presentation code
+
+The presentation examples verify the boundary from inside the payload and print `PASS` or `FAIL`:
+
+```bash
+sandbox --config examples/presentation/filesystem.yaml
+sandbox --config examples/presentation/network-isolation.yaml
+sandbox --config examples/presentation/identity-and-capabilities.yaml
+sandbox --config examples/presentation/seccomp.yaml
+```
+
+These examples use a remote Ubuntu rootfs because their payloads require Python.
+
+## Testing
+
+Run the normal standalone checks:
+
+```bash
+cd sandbox/sandbox
+go test -count=1 ./...
 go vet ./...
-go run . --network-mode=none -- /bin/echo "hello world"
+go mod tidy -diff
 ```
 
-Use a temporary output path when a standalone executable is needed:
-
-```bash
-go build -o "${TMPDIR:-/tmp}/sandbox" .
-```
-
-With a freshly built binary, the equivalent first-run command is:
-
-```bash
-./sandbox-bin --network-mode=none -- /bin/echo "hello world"
-```
-
-For an interactive terminal session, use `--interactive` (or `-i`) with a
-terminal-oriented payload:
-
-```bash
-sandbox-bin --interactive -- /bin/bash -i
-sandbox-bin -i -- /usr/bin/python3 -i
-```
-
-Bazel mirrors the module and packages the executable without writing build
-outputs into the source tree:
+For repository-wide Bazel validation:
 
 ```bash
 bazel build //sandbox:sandbox
 bazel test //sandbox:sandbox_tests
-bazel build //pkg:study_project_dist
 ```
 
-The distribution archive contains the executable at `sandbox/sandbox` with
-its executable permission preserved.
+Some opt-in integration tests need network access, delegated cgroup-v2 controllers or `CAP_NET_ADMIN`. A restricted host may build the project while being unable to run those specific tests.
 
-## Managed rootfs
+## Troubleshooting
 
-If `rootfs_source` is omitted or empty, the host-side parent provisions the
-managed rootfs before creating cgroups, network resources, or namespaces. This
-also applies when the requested network mode is `none`. The first launch
-downloads the pinned Alpine 3.24.1 minirootfs archive over HTTPS, verifies its
-pinned SHA-256 digest, securely extracts it, writes a manifest, and publishes
-it atomically. Later launches reuse the verified cache and work offline.
+**Namespace creation is denied**
 
-The cache is under `os.UserCacheDir()`:
+Confirm that the Linux distribution and administrator policy allow unprivileged user namespaces.
 
-```text
-<user-cache>/bcs-zc241t-sandbox/rootfs/alpine/3.24.1/x86_64
-<user-cache>/bcs-zc241t-sandbox/rootfs/alpine/3.24.1/aarch64
-```
+**The payload is missing**
 
-Go `amd64` maps to Alpine `x86_64`, and Go `arm64` maps to Alpine `aarch64`.
-Other architectures are rejected before any network request. The archive name,
-release URL, and digests are pinned in reviewed Go source; the mutable
-`latest-stable` release path is not used. Downloads stream to temporary storage
-without a fixed compressed-size ceiling; extracted and cached trees are limited
-to 512 MiB total, 128 MiB per file, and 100,000 entries.
+The selected rootfs must contain the executable and any dynamic libraries or other dependencies it needs.
 
-To force a fresh managed download, remove the matching managed architecture
-directory and launch again. A custom non-empty `rootfs_source` is user-managed
-and may contain any compatible Linux rootfs: it must already exist, is never
-downloaded or repaired, and is not modified by the provisioning code. The
-payload must be present in the selected rootfs;
-`/bin/echo` is available in the managed Alpine rootfs.
+**A host file is not visible**
 
-For a verified remote rootfs, configure `remote_rootfs` instead of
-`rootfs_source`:
+Add it as a bind mount. Remember that `host_path` values are resolved relative to the YAML file.
 
-```yaml
-remote_rootfs:
-  url: https://example.com/rootfs-amd64.tar.gz
-  architecture: amd64
-  archive_sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-  # max_extracted_size_mb: 2048  # use for an Ubuntu-sized rootfs
-  # max_file_size_mb: 0
-  # max_entries: 0
-```
+**A cgroup limit cannot be applied**
 
-The remote URL must be HTTPS and the archive SHA-256 is mandatory; it must be
-lowercase and exactly 64 hexadecimal characters. The archive SHA-256
-authenticates the downloaded bytes. Remote archives are cached under their
-digest, never under their URL, and are extracted only after the
-downloaded bytes match that digest. Archive format is identified from content,
-so any unencrypted archive recognized by the pinned archive library may be used
-when its entries form a valid rootfs tree. Compressed files that are not
-archives and unsafe entry types are rejected, and archive metadata is not
-restored. Remote rootfs launches must keep `read_only_root: true`; local and
-remote rootfs sources cannot be combined. A failed remote download never falls
-back to the built-in Alpine rootfs. Optional remote tree limits default to
-512 MiB total, 128 MiB per file, and
-100,000 entries; zero selects those defaults, and the active limits are
-reapplied when a cache is reused. The extracted cache is owned by the user and
-trusted rather than rehashed on reuse; remove its matching cache entry to
-repair a locally modified cache.
+Confirm that cgroup v2 is mounted and the requested controller is enabled and delegated to the current session.
 
-When a configuration is loaded from a YAML file, a non-empty relative
-`rootfs_source` and each non-empty relative `bind_mounts[].host_path` are
-resolved relative to that file's directory. Empty host paths remain invalid.
-`working_dir` and bind `container_path` values are sandbox paths and are not
-resolved against the YAML file. Reader-based configuration loading has no
-filename context, so it continues to require absolute host paths.
+**Bridge mode fails**
 
-The namespace-free archive maintenance check can be run with
-`SANDBOX_ALPINE_MAINTENANCE=1`; it downloads both pinned archives, verifies
-their archive digests, and securely extracts them.
-The managed-rootfs E2E check can be enabled with
-`SANDBOX_MANAGED_ROOTFS_E2E=1`; it uses a fresh temporary `XDG_CACHE_HOME`,
-then repeats the launch with unusable proxy settings to verify offline reuse.
+Check `CAP_NET_ADMIN`, IPv4 forwarding, the trusted `ip` and `iptables` executables, and subnet overlap.
 
-## Platform and runtime requirements
+**First-run rootfs provisioning fails**
 
-The program is Linux-only and executable targets are currently limited to
-amd64 and arm64. Host and none modes are designed to work without
-global root when unprivileged user namespaces, mount namespaces, PID/UTS
-namespaces, `pivot_root`, `openat2`, the Linux new mount API
-(`open_tree`, `mount_setattr`, `move_mount`, and
-`fsopen`/`fsconfig`/`fsmount`), seccomp, and the required kernel policy are
-available.
-The configured rootfs must contain the command and its runtime files; statically
-linked payloads are the simplest option. `/proc` is mounted by the sandbox. If
-the root must be writable, or a required mount target is missing, the sandbox
-assembles a private overlay and creates missing targets there. The configured
-rootfs is never changed. Existing targets must match their source type, and
-symlinked paths or unsafe target paths are rejected.
-`read_only_root: false` is a per-run writable overlay: changes disappear when
-the sandbox exits and are never written back to the rootfs source.
+Check HTTPS access and retry. Incomplete downloads are not published as valid cache entries.
 
-Bridge mode additionally requires effective `CAP_NET_ADMIN`, trusted `ip` and
-`iptables` commands, and enabled IPv4 forwarding. It creates uniquely named
-links and owned firewall rules and rolls
-back only resources created by that run.
-Run bridge mode through an absolute installed path with `sudo`, for example:
+## Project layout
 
-```text
-sudo /absolute/path/to/sandbox --network-mode=bridge ... -- command
-```
-IPv4 forwarding must be enabled. Do not apply file capabilities such as
-`setcap cap_net_admin+ep` to the self-reexecuting sandbox binary.
-
-CPU limits from 1 through 100 require
-a delegated CPU controller in a writable cgroup-v2 hierarchy; `0` disables
-the CPU limit. If that controller is unavailable, configure
-`cpu_limit_percent: 0` or provide the required delegation.
-Aggregate memory and process limits are also disabled by default. Explicit
-`memory_limit_gb` and `max_processes` values require delegated `memory` and
-`pids` controllers in the same writable cgroup-v2 hierarchy. A CPU percentage
-is a quota relative to one CPU over the selected period. `max_processes` maps
-to `pids.max`, which counts sandbox infrastructure and kernel tasks, including
-Go runtime threads. Memory limiting also disables additional swap. All limits
-require the relevant controllers to be enabled in a writable delegated
-cgroup-v2 hierarchy.
-
-The default security policy drops `ALL` capabilities and uses a killing
-policy for blocked syscalls. Only `kill` and `trap` are accepted: `kill`
-terminates the process and `trap` delivers `SIGSYS`. The accepted blocked
-syscall names are `reboot`, `mount`, `ptrace`, `swapon`, `syslog`,
-`init_module`, `finit_module`, `delete_module`, `kcmp`, `process_vm_readv`,
-and `process_vm_writev`; `iopl` and `ioperm` are amd64-only. The denylist has
-an architecture guard but is not a complete syscall allowlist or a guarantee
-against hostile workloads. Configuration names are validated before a child
-or bridge is created. Use one `command` list in YAML or positional CLI arguments; public
-flags must precede the command, and `--` explicitly terminates the flag
-section. Environment names must be valid shell variable names and duplicate
-keys are rejected.
-
-Standard output belongs to the payload. Sandbox diagnostics, including setup
-failures, are written to standard error.
-
-Interactive mode is also available in YAML with `interactive: true`. It
-requires stdin to be a terminal; redirected stdout is allowed, but payload
-stdout uses the PTY while stderr remains a separate stream; separate streams do
-not guarantee cross-stream ordering. The host terminal is restored on return,
-`SIGWINCH` resizes the PTY, and an unsuccessful resize keeps the last
-known size. An explicit `TERM` in the configuration is preserved; otherwise a
-short conservative host `TERM` value is copied, with invalid or missing values
-replaced by `TERM=dumb`. `COLORTERM` is not copied by this policy. Ordinary
-piped commands should omit interactive mode and retain separate standard
-input, output, and error streams.
-
-Storage uses `RLIMIT_FSIZE`, which is a per-file size limit rather than a
-total disk quota. Set `file_size_limit_mb` or `--file-size-limit`; zero
-disables it. The limit is applied as both the soft and hard ceiling. Bind
-mounts are read-only unless `writable: true` is explicitly configured.
-
-## Frozen Python demo
-
-The original Python proof-of-concept is frozen in `sandbox/demo`. Its Bazel
-targets and usage instructions are documented separately in
-[sandbox/demo/README.md](sandbox/demo/README.md). The frozen demo is not the
-implementation or package entrypoint for the Go sandbox.
+- `sandbox/sandbox/` - current Go implementation
+- `examples/` - user and presentation policies
+- `docs/` - project reports, presentation content and demonstration script
+- `sandbox/demo/` - frozen Python proof of concept
