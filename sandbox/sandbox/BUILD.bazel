@@ -13,6 +13,7 @@ go_library(
     name = "network",
     srcs = glob(["network/*.go"], exclude = ["network/*_test.go"]),
     importpath = "sandbox/sandbox/network",
+    deps = ["@org_golang_x_sys//unix:go_default_library"],
 )
 
 go_library(
@@ -174,6 +175,7 @@ go_test(
     name = "network_test",
     srcs = glob(["network/*.go"]),
     importpath = "sandbox/sandbox/network",
+    deps = ["@org_golang_x_sys//unix:go_default_library"],
 )
 
 go_test(

@@ -74,9 +74,7 @@ func runMinimalRootfsScenario(t *testing.T, sandbox, probe string, readOnlyRoot 
 		t.Fatalf("minimal rootfs launch failed: %v\n%s", err, output)
 	}
 	text := string(output)
-	if got := findLine(text, "identity="); got != "identity=uid=0 gid=0 pid=2 ppid=1 cwd=/work" {
-		t.Fatalf("payload identity = %q\n%s", got, text)
-	}
+	requireSupervisedPayloadIdentity(t, text, "/work")
 	if findLine(text, "pidns=") == "" || findLine(text, "ready") != "ready" {
 		t.Fatalf("synthesized proc mount was not observable: %s", text)
 	}

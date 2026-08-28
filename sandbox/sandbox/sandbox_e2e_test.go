@@ -42,11 +42,7 @@ func TestSandboxRootlessHostAndNone(t *testing.T) {
 			if got := findLine(text, "setgroups="); got != "setgroups=deny" {
 				t.Fatalf("setgroups = %q, want deny\n%s", got, text)
 			}
-			identity := findLine(text, "identity=")
-			wantIdentity := "uid=0 gid=0 pid=2 ppid=1 cwd=/work"
-			if identity != "identity="+wantIdentity {
-				t.Fatalf("identity = %q, want %q\n%s", identity, wantIdentity, text)
-			}
+			requireSupervisedPayloadIdentity(t, text, "/work")
 			if got := findLine(text, "userns="); got == "" || got == parentUserNS {
 				t.Fatalf("user namespace was not isolated: %q", got)
 			}

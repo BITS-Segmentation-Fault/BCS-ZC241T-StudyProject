@@ -39,7 +39,13 @@ func Child(p2cRFd int) int {
 		return 1
 	}
 
-	if cfg.NetworkMode == network.Bridge {
+	switch cfg.NetworkMode {
+	case network.None:
+		if err := network.ConfigureIsolatedLoopback(); err != nil {
+			childLog(fmt.Sprintf("Network config failed: %v", err))
+			return 1
+		}
+	case network.Bridge:
 		if err := network.ConfigureChildIface(cfg.BridgeConfig); err != nil {
 			childLog(fmt.Sprintf("Bridge config failed: %v", err))
 			return 1

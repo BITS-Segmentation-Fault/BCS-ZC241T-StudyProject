@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -159,6 +161,36 @@ func findLine(output, prefix string) string {
 	return ""
 }
 
+var supervisedPayloadIdentityPattern = regexp.MustCompile(`^identity=uid=([0-9]+) gid=([0-9]+) pid=([0-9]+) ppid=([0-9]+) cwd=(.*)$`)
+
+func requireSupervisedPayloadIdentity(t *testing.T, output, wantWorkingDir string) {
+	t.Helper()
+	line := findLine(output, "identity=")
+	matches := supervisedPayloadIdentityPattern.FindStringSubmatch(line)
+	if len(matches) != 6 {
+		t.Fatalf("payload identity = %q, want a complete identity line", line)
+	}
+	uid, err := strconv.Atoi(matches[1])
+	if err != nil {
+		t.Fatalf("payload UID in %q is invalid: %v", line, err)
+	}
+	gid, err := strconv.Atoi(matches[2])
+	if err != nil {
+		t.Fatalf("payload GID in %q is invalid: %v", line, err)
+	}
+	pid, err := strconv.Atoi(matches[3])
+	if err != nil {
+		t.Fatalf("payload PID in %q is invalid: %v", line, err)
+	}
+	ppid, err := strconv.Atoi(matches[4])
+	if err != nil {
+		t.Fatalf("payload parent PID in %q is invalid: %v", line, err)
+	}
+	if uid != 0 || gid != 0 || ppid != 1 || pid <= 1 || matches[5] != wantWorkingDir {
+		t.Fatalf("payload identity = %q, want uid=0 gid=0 pid>1 ppid=1 cwd=%s", line, wantWorkingDir)
+	}
+}
+
 func skipOrFail(t *testing.T, reason string) {
 	t.Helper()
 	if value := os.Getenv("SANDBOX_E2E_REQUIRED"); value == "1" || strings.EqualFold(value, "true") {
@@ -197,6 +229,7 @@ func newSandboxConfig(rootfs, mode string, command ...string) config.Config {
 	cfg.EnvVars = []string{"PATH=/bin:/usr/bin", "PROBE_VALUE=probe-value"}
 	cfg.RootFSSource = rootfs
 	cfg.ReadOnlyRoot = false
+	cfg.WorkingDir = "/work"
 	cfg.NetworkMode = network.NetworkMode(mode)
 	return cfg
 }
