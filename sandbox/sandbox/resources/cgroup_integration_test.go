@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -43,7 +44,9 @@ func classifyCgroupAPIError(operation string, err error) error {
 
 func TestDelegatedResourceControls(t *testing.T) {
 	if os.Getenv(cgroupHelperEnvironment) == "1" {
-		select {}
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
 
 	if err := delegatedResourcePrerequisite(); err != nil {
