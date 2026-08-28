@@ -1,0 +1,1 @@
+This file is deliberately exposed through a read-only bind mount.

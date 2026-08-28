@@ -1,0 +1,9 @@
+command: ["/usr/bin/python3"]
+interactive: true
+network_mode: none
+read_only_root: true
+remote_rootfs:
+  url: https://cloud-images.ubuntu.com/releases/noble/release-20260826/ubuntu-24.04-server-cloudimg-amd64-root.tar.xz
+  architecture: amd64
+  archive_sha256: df1146e4f2bc372b193c966b709f1b5e22a5facb27721ad80c5bae254040c380
+  max_extracted_size_mb: 2048
