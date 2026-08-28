@@ -922,52 +922,76 @@ func mountProc() (int, error) {
 	return mountFD, nil
 }
 
-func mountDNS(servers []string) (int, int, error) {
-	fd, err := makeDNSMemfd(servers)
+func mountDNS(servers []string) (mountFD, sourceFD int, retErr error) {
+	mountFD, sourceFD = -1, -1
+	tmpfsFD, err := mountTmpfsWithMode("0700")
 	if err != nil {
 		return -1, -1, err
 	}
-	mountFD, err := cloneMount(fd, false)
-	if err != nil {
-		_ = unix.Close(fd)
-		return -1, -1, err
+	closeOnError := func(cause error) (int, int, error) {
+		if sourceFD >= 0 {
+			cause = errors.Join(cause, closeOwnedFD(&sourceFD, "DNS source"))
+		}
+		if mountFD >= 0 {
+			cause = errors.Join(cause, closeOwnedFD(&mountFD, "DNS mount"))
+		}
+		cause = errors.Join(cause, closeOwnedFD(&tmpfsFD, "DNS tmpfs"))
+		return -1, -1, cause
 	}
-	return mountFD, fd, nil
-}
 
-func makeDNSMemfd(servers []string) (int, error) {
-	fd, err := unix.MemfdCreate("sandbox-resolv.conf", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	writableFD, err := unix.Openat(tmpfsFD, "resolv.conf", unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
 	if err != nil {
-		return -1, fmt.Errorf("create DNS memfd: %w", err)
+		return closeOnError(fmt.Errorf("create DNS file: %w", err))
 	}
-	closeFD := true
+	closeWritableOnError := true
 	defer func() {
-		if closeFD {
-			_ = unix.Close(fd)
+		if closeWritableOnError {
+			retErr = errors.Join(retErr, closeOwnedFD(&writableFD, "writable DNS file"))
 		}
 	}()
+	data := formatDNSContent(servers)
+	for len(data) > 0 {
+		n, writeErr := unix.Write(writableFD, data)
+		if writeErr != nil {
+			return closeOnError(fmt.Errorf("write DNS file: %w", writeErr))
+		}
+		if n == 0 {
+			return closeOnError(fmt.Errorf("write DNS file: %w", unix.Errno(unix.EIO)))
+		}
+		data = data[n:]
+	}
+	if err := unix.Fchmod(writableFD, 0444); err != nil {
+		return closeOnError(fmt.Errorf("make DNS file read-only: %w", err))
+	}
+	if err := unix.Close(writableFD); err != nil {
+		writableFD = -1
+		closeWritableOnError = false
+		return closeOnError(fmt.Errorf("close writable DNS file: %w", err))
+	}
+	writableFD = -1
+	closeWritableOnError = false
+	sourceFD, err = unix.Openat(tmpfsFD, "resolv.conf", unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return closeOnError(fmt.Errorf("reopen DNS file: %w", err))
+	}
+	mountFD, err = cloneMount(sourceFD, false)
+	if err != nil {
+		return closeOnError(err)
+	}
+	if err := closeOwnedFD(&tmpfsFD, "DNS tmpfs"); err != nil {
+		return closeOnError(err)
+	}
+	return mountFD, sourceFD, nil
+}
+
+func formatDNSContent(servers []string) []byte {
 	var content strings.Builder
 	for _, server := range servers {
 		content.WriteString("nameserver ")
 		content.WriteString(server)
 		content.WriteByte('\n')
 	}
-	data := []byte(content.String())
-	for len(data) > 0 {
-		n, writeErr := unix.Write(fd, data)
-		if writeErr != nil {
-			return -1, fmt.Errorf("write DNS memfd: %w", writeErr)
-		}
-		if n == 0 {
-			return -1, fmt.Errorf("write DNS memfd: %w", unix.Errno(unix.EIO))
-		}
-		data = data[n:]
-	}
-	if _, err := unix.FcntlInt(uintptr(fd), unix.F_ADD_SEALS, unix.F_SEAL_SEAL|unix.F_SEAL_SHRINK|unix.F_SEAL_GROW|unix.F_SEAL_WRITE); err != nil {
-		return -1, fmt.Errorf("seal DNS memfd: %w", err)
-	}
-	closeFD = false
-	return fd, nil
+	return []byte(content.String())
 }
 
 func hasParentComponent(path string) bool {

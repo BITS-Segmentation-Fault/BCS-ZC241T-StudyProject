@@ -178,29 +178,11 @@ func TestRequireSameTypeRejectsUnsupportedSource(t *testing.T) {
 	}
 }
 
-func TestDNSMemfdIsCompleteAndSealed(t *testing.T) {
-	fd, err := makeDNSMemfd([]string{"1.1.1.1", "2001:4860:4860::8888"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer unix.Close(fd)
-	data := make([]byte, 128)
-	n, err := unix.Pread(fd, data, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := string(data[:n])
+func TestFormatDNSContent(t *testing.T) {
+	got := string(formatDNSContent([]string{"1.1.1.1", "2001:4860:4860::8888"}))
 	want := "nameserver 1.1.1.1\nnameserver 2001:4860:4860::8888\n"
 	if got != want {
 		t.Fatalf("DNS contents = %q, want %q", got, want)
-	}
-	seals, err := unix.FcntlInt(uintptr(fd), unix.F_GET_SEALS, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	required := unix.F_SEAL_SEAL | unix.F_SEAL_SHRINK | unix.F_SEAL_GROW | unix.F_SEAL_WRITE
-	if seals&required != required {
-		t.Fatalf("DNS seals = %#x, want %#x", seals, required)
 	}
 }
 
